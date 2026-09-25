@@ -54,11 +54,15 @@ const NUMBERED = /^\s*(\d+)[.)]\s+(.*)$/
  * включая звёздочки и квадратные скобки. Жирный идёт раньше курсива, иначе
  * `**` разберётся как две курсивные звёздочки.
  */
-const INLINE = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[\d{1,3}\])/g
+const INLINE = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[\d{1,3}(?:\s*[,;]\s*\d{1,3})*\])/g
 
 export function parseInline(text: string): Inline[] {
   const parts = text.split(INLINE).filter((part) => part !== '')
-  return parts.map((part): Inline => {
+  // flatMap, а не map: одна скобка «[1, 2]» — это один кусок текста и ДВА
+  // узла. Заводить ради этого отдельный вид узла значило бы обязать
+  // каждого, кто рисует ответ, помнить про второй случай; развернуть здесь
+  // — значит на выходе по-прежнему только одиночные ссылки.
+  return parts.flatMap((part): Inline | Inline[] => {
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
       return { kind: 'code', text: part.slice(1, -1) }
     }
@@ -68,8 +72,20 @@ export function parseInline(text: string): Inline[] {
     if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
       return { kind: 'italic', text: part.slice(1, -1) }
     }
-    const citation = /^\[(\d{1,3})\]$/.exec(part)
-    if (citation) return { kind: 'citation', number: Number(citation[1]) }
+    // Одна скобка на несколько номеров: [1, 2].
+    //
+    // Так модели сносят источники, и запретить это промптом до конца не
+    // выходит. Пока разбирался только одиночный номер, «[1, 2]» оставалось
+    // обычным текстом: не ссылка, не кликается, и в разборе выглядело
+    // ответом без источников. Первый номер берём здесь, остальные
+    // распаковывает `expandCitations` — разбор инлайна отдаёт по узлу на
+    // кусок текста, а тут кусок один, а узлов нужно несколько.
+    const citation = /^\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)\]$/.exec(part)
+    if (citation) {
+      return citation[1]
+        .split(/[,;]/)
+        .map((value): Inline => ({ kind: 'citation', number: Number(value.trim()) }))
+    }
     // Всё прочее — текст. Сюда попадают и угловые скобки, и незакрытые
     // звёздочки, и то, что выглядит как markdown-ссылка: ни один из этих
     // случаев не создаёт узла, кроме текстового.

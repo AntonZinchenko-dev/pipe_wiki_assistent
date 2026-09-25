@@ -1,4 +1,5 @@
 import type { Exchange } from '@/entities/answer'
+import type { OpenTableRef } from '@/shared/api/client'
 
 /**
  * Что из ленты уходит на сервер как память диалога.
@@ -41,4 +42,33 @@ export function asTurns(
   // потому что клиенту верить нельзя; клиент режет затем, чтобы не гонять
   // по сети то, что на той стороне всё равно выбросят.
   return turns.slice(-pairs * 2)
+}
+
+/**
+ * Какие таблицы человек видит и чем листать их дальше.
+ *
+ * Здесь же, по той же причине, что и `asTurns`: превращение ленты в поля
+ * запроса — дело отправителя. Берём только последние: смысл имеет то, что
+ * на экране, а не всё, что показывали за день.
+ *
+ * Таблицы БЕЗ метки следующей страницы отбрасываем. Листать в них нечего, а
+ * агенту каждая строка состояния стоит токенов на каждом шаге.
+ */
+export function asOpenTables(exchanges: Exchange[], limit = 2): OpenTableRef[] {
+  const tables: OpenTableRef[] = []
+  for (const exchange of exchanges) {
+    if (exchange.phase !== 'done') continue
+    for (const dataset of exchange.datasets) {
+      if (!dataset.next_cursor || dataset.error) continue
+      tables.push({
+        handle: dataset.handle,
+        title: dataset.title,
+        offset: dataset.offset,
+        shown: dataset.rows.length,
+        total_found: dataset.total_found,
+        next_cursor: dataset.next_cursor,
+      })
+    }
+  }
+  return tables.slice(-limit)
 }

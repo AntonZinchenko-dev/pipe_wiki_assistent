@@ -35,7 +35,7 @@ export function DocumentPage() {
   if (isLoading) return <Spinner label="загружаю документ" />
   if (error) {
     return (
-      <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+      <p className="rounded-lg border border-bad/30 bg-bad-soft p-3 text-sm text-bad-ink">
         {(error as Error).message}
       </p>
     )
@@ -44,27 +44,29 @@ export function DocumentPage() {
 
   return (
     <article className="space-y-5">
-      <nav className="flex items-center gap-1 text-xs text-slate-500">
-        <Link to="/wiki" className="hover:text-slate-800">
+      <nav className="flex items-center gap-1 text-xs text-ink-soft">
+        <Link to="/wiki" className="hover:text-ink">
           Документы
         </Link>
         <IconChevronRight className="size-3.5" />
         <Link
           to={`/wiki?project=${encodeURIComponent(data.project)}`}
-          className="hover:text-slate-800"
+          className="hover:text-ink"
         >
           {data.project}
         </Link>
         <IconChevronRight className="size-3.5" />
-        <span className="truncate text-slate-700">{data.doc_id}</span>
+        <span className="truncate text-ink">{data.doc_id}</span>
       </nav>
 
       <header className="space-y-3">
         <div className="flex items-start gap-3">
-          <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl bg-sky-50 text-sky-600">
+          <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
             <IconDoc className="size-5" />
           </span>
-          <h1 className="text-2xl font-semibold leading-snug text-slate-900">{data.title}</h1>
+          <h1 className="text-[26px] font-semibold leading-snug tracking-tight text-ink">
+            {data.title}
+          </h1>
         </div>
         <div className="flex flex-wrap gap-1.5">
           <Badge>{data.doc_id}</Badge>
@@ -81,23 +83,23 @@ export function DocumentPage() {
             key={chunk.chunk_id}
             id={`chunk-${chunk.chunk_id}`}
             className={cn(
-              'rounded-xl border bg-white p-4 transition',
+              'rounded-xl border bg-surface p-4 shadow-card transition',
               // Подсветка держится, пока в адресе стоит якорь, и не гаснет
               // по таймеру. Человек пришёл сюда проверить цитату: если
               // подсветка исчезнет, пока он читает, он потеряет место и
               // будет искать заново.
               target === `chunk-${chunk.chunk_id}`
-                ? 'border-sky-300 ring-2 ring-sky-200'
-                : 'border-slate-200',
+                ? 'border-accent-line ring-2 ring-accent-line'
+                : 'border-line',
             )}
           >
-            <p className="text-xs font-medium text-slate-500">
+            <p className="text-[11px] font-medium uppercase tracking-wider text-ink-faint">
               {chunk.heading_path} · {pages(chunk.page_from, chunk.page_to)}
               {target === `chunk-${chunk.chunk_id}` ? (
-                <span className="ml-1.5 text-sky-700">· фрагмент из ответа</span>
+                <span className="ml-1.5 text-accent-ink">· фрагмент из ответа</span>
               ) : null}
             </p>
-            <p className="mt-1.5 whitespace-pre-wrap text-[15px] leading-relaxed text-slate-800">
+            <p className="mt-2 whitespace-pre-wrap text-[15px] leading-[1.65] text-ink">
               {chunk.body}
             </p>
           </li>

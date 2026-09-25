@@ -83,40 +83,40 @@ export function ModelPicker() {
         aria-expanded={open}
         className={cn(
           'flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm transition',
-          'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50',
+          'border-line bg-surface text-ink hover:border-line hover:bg-sunken',
         )}
         title={current ? `${current.provider} · ${current.model}` : 'выбор модели'}
       >
         {local ? (
-          <IconCpu className="size-4 text-slate-400" />
+          <IconCpu className="size-4 text-ink-faint" />
         ) : (
-          <IconCloud className="size-4 text-sky-500" />
+          <IconCloud className="size-4 text-accent" />
         )}
         <span className="max-w-44 truncate font-medium">{label}</span>
         {chosen ? null : (
-          <span className="hidden text-xs text-slate-400 sm:inline">по умолчанию</span>
+          <span className="hidden text-xs text-ink-faint sm:inline">по умолчанию</span>
         )}
-        <IconChevronDown className="size-4 text-slate-400" />
+        <IconChevronDown className="size-4 text-ink-faint" />
       </button>
 
       {open ? (
         <div
           role="listbox"
-          className="absolute right-0 z-30 mt-1.5 w-80 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg shadow-slate-900/5"
+          className="absolute right-0 z-30 mt-1.5 w-80 overflow-hidden rounded-xl border border-line bg-surface shadow-raised"
         >
           <button
             type="button"
             role="option"
             aria-selected={chosen === null}
             onClick={() => pick(null)}
-            className="flex w-full items-start gap-2 px-3 py-2.5 text-left hover:bg-slate-50"
+            className="flex w-full items-start gap-2 px-3 py-2.5 text-left hover:bg-sunken"
           >
             <span className="mt-0.5 size-4 shrink-0">
-              {chosen === null ? <IconCheck className="size-4 text-sky-600" /> : null}
+              {chosen === null ? <IconCheck className="size-4 text-accent" /> : null}
             </span>
             <span className="min-w-0">
-              <span className="block text-sm font-medium text-slate-900">Как настроено</span>
-              <span className="block text-xs text-slate-500">
+              <span className="block text-sm font-medium text-ink">Как настроено</span>
+              <span className="block text-xs text-ink-soft">
                 {serverDefault
                   ? `сейчас это ${shortLabel(serverDefault.model)}`
                   : 'первый провайдер из цепочки на сервере'}
@@ -125,14 +125,14 @@ export function ModelPicker() {
           </button>
 
           {error ? (
-            <p className="border-t border-slate-100 px-3 py-2.5 text-xs text-red-700">
+            <p className="border-t border-line-soft px-3 py-2.5 text-xs text-bad-ink">
               Список моделей не пришёл: {(error as Error).message}
             </p>
           ) : null}
 
           {[...byProvider.entries()].map(([provider, group]) => (
-            <div key={provider} className="border-t border-slate-100">
-              <p className="flex items-center gap-1.5 px-3 pb-1 pt-2.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
+            <div key={provider} className="border-t border-line-soft">
+              <p className="flex items-center gap-1.5 px-3 pb-1 pt-2.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
                 {isLocal(provider) ? (
                   <IconCpu className="size-3.5" />
                 ) : (
@@ -153,16 +153,16 @@ export function ModelPicker() {
                     role="option"
                     aria-selected={active}
                     onClick={() => pick(option)}
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50"
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-sunken"
                   >
                     <span className="size-4 shrink-0">
-                      {active ? <IconCheck className="size-4 text-sky-600" /> : null}
+                      {active ? <IconCheck className="size-4 text-accent" /> : null}
                     </span>
-                    <span className="min-w-0 flex-1 truncate text-sm text-slate-800">
+                    <span className="min-w-0 flex-1 truncate text-sm text-ink">
                       {option.model}
                     </span>
                     {option.is_default ? (
-                      <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">
+                      <span className="shrink-0 rounded bg-sunken px-1.5 py-0.5 text-xs text-ink-soft">
                         сервер
                       </span>
                     ) : null}
@@ -173,7 +173,7 @@ export function ModelPicker() {
           ))}
 
           {!isLoading && options.length === 0 && !error ? (
-            <p className="border-t border-slate-100 px-3 py-2.5 text-xs text-slate-500">
+            <p className="border-t border-line-soft px-3 py-2.5 text-xs text-ink-soft">
               Провайдеры не вернули ни одной модели. Проверьте, запущена ли Ollama.
             </p>
           ) : null}

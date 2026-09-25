@@ -21,10 +21,11 @@ import { createExchange, type Exchange, type ExchangePhase } from '@/entities/an
 import { useAgentMode, useModelChoice } from '@/entities/chat-model'
 import { loadRecords, saveRecord, trimThread, useThreads } from '@/entities/thread'
 import { postChat } from '@/shared/api/client'
-import { asTurns } from './lib/turns'
+import { asOpenTables, asTurns } from './lib/turns'
 import { readSse } from '@/shared/api/sse'
 import type {
   AnswerEvent,
+  Dataset,
   DoneEvent,
   ErrorEvent,
   MemoryEvent,
@@ -222,6 +223,10 @@ export const useAssistant = create<AssistantState>((set, get) => {
 
       const sent = get().exchanges
       const turns = asTurns(sent, config.historyTurns, thread?.foldedAt ?? 0)
+      // Курсоры таблиц берём из ВСЕЙ ленты, а не из несвёрнутой части:
+      // памятка пересказывает слова, а таблица на экране не исчезает от
+      // того, что реплики про неё свернулись.
+      const openTables = asOpenTables(sent)
       // До какой отметки разговор окажется свёрнутым, если сервер пришлёт
       // памятку. Считаем ЗДЕСЬ, до ответа: к моменту, когда памятка
       // приедет, в ленте уже будет новый обмен, и по ней получилось бы,
@@ -256,6 +261,7 @@ export const useAssistant = create<AssistantState>((set, get) => {
           signal,
           turns,
           thread?.summary ?? '',
+          openTables,
         )
 
         for await (const event of readSse(response)) {
@@ -266,6 +272,11 @@ export const useAssistant = create<AssistantState>((set, get) => {
               patch(exchange.id, { meta: event.data as MetaEvent })
               break
             case 'delta':
+              // Первый токен ответа — и рассказ о процессе больше не
+              // нужен: виден результат.
+              if (get().exchanges.find((item) => item.id === exchange.id)?.step) {
+                patch(exchange.id, { step: '' })
+              }
               pending += (event.data as { text: string }).text
               scheduleFlush(exchange.id)
               break
@@ -273,6 +284,21 @@ export const useAssistant = create<AssistantState>((set, get) => {
               // Финальная структура приходит одним событием: статус, цитаты с
               // результатом проверки, признак валидности схемы.
               patch(exchange.id, { answer: event.data as AnswerEvent })
+              break
+            case 'step':
+              patch(exchange.id, { step: (event.data as { text: string }).text })
+              break
+            case 'dataset':
+              // Таблица приходит ДО ответа и копится отдельно от него:
+              // она верна независимо от того, что напишет модель и
+              // допишет ли вообще.
+              set((state) => ({
+                exchanges: state.exchanges.map((item) =>
+                  item.id === exchange.id
+                    ? { ...item, datasets: [...item.datasets, event.data as Dataset] }
+                    : item,
+                ),
+              }))
               break
             case 'memory':
               // Сервер свернул накопившуюся переписку в памятку. Кладём

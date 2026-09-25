@@ -143,3 +143,33 @@ describe('граница держится кодом, а не обещанием
     expect(files.length).toBeGreaterThan(10)
   })
 })
+
+describe('несколько номеров одной скобкой', () => {
+  it('«[1, 2]» — это две ссылки, а не текст', () => {
+    // Из живого прогона: модель свела два источника в одну скобку, и весь
+    // ответ проехал мимо — скобка осталась обычным текстом, ссылки не
+    // кликались, а проверка на сервере сочла ответ вовсе без источников и
+    // переписала статус на «в документации нет ответа».
+    const nodes = parseInline('независимо от замеров [1, 2].')
+
+    expect(nodes.filter((node) => node.kind === 'citation')).toEqual([
+      { kind: 'citation', number: 1 },
+      { kind: 'citation', number: 2 },
+    ])
+  })
+
+  it('точка с запятой считается так же', () => {
+    const nodes = parseInline('по регламенту [3;4]')
+
+    expect(nodes.filter((node) => node.kind === 'citation')).toHaveLength(2)
+  })
+
+  it('одиночная ссылка работает как работала', () => {
+    expect(parseInline('порог 80 % [2].')).toContainEqual({ kind: 'citation', number: 2 })
+  })
+
+  it('перечисление без скобок ссылкой не становится', () => {
+    // «1, 2» в тексте — это просто числа. Ссылкой делает скобка.
+    expect(parseInline('строки 1, 2 и 3').some((node) => node.kind === 'citation')).toBe(false)
+  })
+})

@@ -50,11 +50,11 @@ export function AgentToggle() {
       className={cn(
         'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-sm transition',
         on
-          ? 'border-sky-300 bg-sky-50 font-medium text-sky-700'
-          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
+          ? 'border-accent-line bg-accent-soft font-medium text-accent-ink'
+          : 'border-line bg-surface text-ink-soft hover:bg-sunken',
       )}
     >
-      <IconSparkle className={cn('size-4', on ? 'text-sky-600' : 'text-slate-400')} />
+      <IconSparkle className={cn('size-4', on ? 'text-accent' : 'text-ink-faint')} />
       <span className="hidden sm:inline">Агент</span>
     </button>
   )

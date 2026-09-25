@@ -27,5 +27,5 @@ export default defineConfig({
   // неприятно, но альтернатива — импортировать сюда конфиг vite и снова
   // столкнуть два набора типов, ради которых файл и заведён.
   resolve: { alias: { '@': path.resolve(__dirname, 'src') } },
-  test: { environment: 'jsdom', globals: true },
+  test: { environment: 'jsdom', globals: true, setupFiles: ['./vitest.setup.ts'] },
 })

@@ -3,7 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>PIPEWIKI — ассистент по внутренней вики</title>
+    <!--
+      Тема выставляется ДО загрузки скрипта приложения.
+
+      Иначе между показом страницы и стартом React проходит момент, когда
+      тёмный интерфейс белый. Вспышка короткая и очень заметная — именно
+      по ней видно, что тёмную тему приделали сбоку. Поэтому крошечный
+      синхронный скрипт прямо здесь: он выполняется раньше отрисовки.
+    -->
+    <script>
+      ;(function () {
+        try {
+          var saved = localStorage.getItem('pipewiki.theme') || 'system'
+          var dark =
+            saved === 'dark' ||
+            (saved === 'system' && matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+        } catch (error) {
+          document.documentElement.dataset.theme = 'light'
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

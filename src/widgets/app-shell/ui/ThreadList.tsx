@@ -1,5 +1,6 @@
 import { useThreads } from '@/entities/thread'
 import { IconChat, IconPlus, IconTrash } from '@/shared/ui/icons'
+import { GroupLabel } from '@/shared/ui/primitives'
 import { cn } from '@/shared/lib/cn'
 
 /**
@@ -28,16 +29,14 @@ export function ThreadList() {
 
   return (
     <div>
-      <div className="flex items-center justify-between gap-2 px-2.5 pb-1 pt-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-          Диалоги
-        </p>
+      <div className="flex items-center justify-between gap-2 pr-1.5">
+        <GroupLabel>Диалоги</GroupLabel>
         <button
           type="button"
           onClick={() => select(null)}
           aria-label="новый диалог"
           title="Новый диалог"
-          className="flex size-5 items-center justify-center rounded text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+          className="mt-2 flex size-6 shrink-0 items-center justify-center rounded-md text-ink-faint transition hover:bg-sunken hover:text-ink"
         >
           <IconPlus className="size-3.5" />
         </button>
@@ -49,7 +48,7 @@ export function ThreadList() {
             key={thread.id}
             className={cn(
               'group flex items-center gap-2 rounded-lg pr-1 transition',
-              currentId === thread.id ? 'bg-sky-50' : 'hover:bg-slate-100',
+              currentId === thread.id ? 'bg-accent-soft' : 'hover:bg-sunken',
             )}
           >
             <button
@@ -57,10 +56,10 @@ export function ThreadList() {
               onClick={() => select(thread.id)}
               className={cn(
                 'flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-2 text-left text-sm',
-                currentId === thread.id ? 'font-medium text-sky-700' : 'text-slate-600',
+                currentId === thread.id ? 'font-medium text-accent-ink' : 'text-ink-soft',
               )}
             >
-              <IconChat className="size-4 shrink-0 text-slate-400" />
+              <IconChat className="size-4 shrink-0 text-ink-faint" />
               <span className="min-w-0 flex-1 truncate">{thread.title}</span>
             </button>
             <button
@@ -70,7 +69,7 @@ export function ThreadList() {
               // Видна только при наведении и фокусе. Кнопка удаления,
               // висящая рядом с каждой строкой постоянно, приглашает по
               // себе попасть — а промах здесь невосстановим.
-              className="flex size-6 shrink-0 items-center justify-center rounded text-slate-300 opacity-0 transition hover:bg-white hover:text-red-600 focus-visible:opacity-100 group-hover:opacity-100"
+              className="flex size-6 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition hover:bg-surface hover:text-bad focus-visible:opacity-100 group-hover:opacity-100"
             >
               <IconTrash className="size-3.5" />
             </button>
@@ -78,10 +77,10 @@ export function ThreadList() {
         ))}
 
         {threads.length === 0 ? (
-          <p className="px-2.5 py-2 text-xs text-slate-400">пока пусто</p>
+          <p className="px-2.5 py-2 text-xs text-ink-faint">пока пусто</p>
         ) : null}
         {threads.length > VISIBLE ? (
-          <p className="px-2.5 py-1 text-xs text-slate-400">
+          <p className="px-2.5 py-1 text-xs text-ink-faint">
             и ещё {threads.length - VISIBLE}
           </p>
         ) : null}

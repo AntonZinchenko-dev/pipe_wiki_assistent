@@ -1,12 +1,15 @@
 import type { ReactNode } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { AnswerStatus } from '@/shared/api/contracts'
-import { Badge, Disclosure, Field, Spinner } from '@/shared/ui/primitives'
-import { IconCloud, IconCpu, IconDoc, IconSparkle } from '@/shared/ui/icons'
-import { cost, ms, similarity, tokens } from '@/shared/lib/format'
+import { Badge, Spinner } from '@/shared/ui/primitives'
+import { Drawer } from '@/shared/ui/Drawer'
+import { IconInfo, IconSparkle } from '@/shared/ui/icons'
 import { parseAnswer, type Inline } from '@/shared/lib/markdown'
 import { cn } from '@/shared/lib/cn'
 import { displayText, type Exchange } from '../model/exchange'
+import { AnswerDetails } from './AnswerDetails'
+import { DataTable } from './DataTable'
 
 /**
  * Карточка одного ответа.
@@ -23,9 +26,21 @@ import { displayText, type Exchange } from '../model/exchange'
  * с типами этой сущности.
  */
 
-const STATUS_VIEW: Record<AnswerStatus, { label: string; tone: 'good' | 'warn' | 'bad' | 'info' }> =
+/**
+ * Ярлык статуса. Обычный ответ — НЕЙТРАЛЬНЫМ тоном.
+ *
+ * «Ответ найден» зелёным висело над каждым удачным ответом, то есть почти
+ * всегда. Цвет, который горит при норме, не сообщает о норме — он просто
+ * приучает глаз его не видеть, и вместе с ним перестают замечать жёлтое
+ * «в документации нет ответа». Здесь цветом отмечены только те четыре
+ * состояния, в которых с ответом что-то не так.
+ */
+const STATUS_VIEW: Record<
+  AnswerStatus,
+  { label: string; tone: 'neutral' | 'good' | 'warn' | 'bad' | 'info' }
+> =
   {
-    answered: { label: 'ответ найден', tone: 'good' },
+    answered: { label: 'ответ найден', tone: 'neutral' },
     not_found: { label: 'в документации нет ответа', tone: 'warn' },
     need_clarification: { label: 'нужно уточнение', tone: 'info' },
     no_context: { label: 'подходящих фрагментов нет', tone: 'warn' },
@@ -56,7 +71,14 @@ function InlineRun({
   nodes: Inline[]
   target: (number: number) => string | null
 }) {
-  const badge = 'mx-0.5 rounded bg-sky-50 px-1 text-xs font-semibold text-sky-700'
+  // Отступ ТОЛЬКО СЛЕВА.
+  //
+  // Симметричный отступ отрывал ссылку от следующей за ней точки, и в
+  // тексте появлялось «выработано 97.7 % ресурса [1] . Это выше» — пробел
+  // перед точкой. Мелочь ровно до того момента, пока её не увидишь: после
+  // этого она видна в каждом предложении.
+  const badge =
+    'ml-0.5 rounded bg-accent-soft px-1 align-baseline text-[11px] font-semibold text-accent-ink'
   return (
     <>
       {nodes.map((node, index) => {
@@ -73,7 +95,7 @@ function InlineRun({
             return (
               <code
                 key={index}
-                className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[13px] text-slate-800"
+                className="rounded bg-sunken px-1 py-0.5 font-mono text-[13px] text-ink"
               >
                 {node.text}
               </code>
@@ -82,7 +104,7 @@ function InlineRun({
             const href = target(node.number)
             const label = `[${node.number}]`
             return href ? (
-              <Link key={index} to={href} className={cn(badge, 'hover:bg-sky-100 hover:underline')}>
+              <Link key={index} to={href} className={cn(badge, 'hover:bg-accent-soft hover:underline')}>
                 {label}
               </Link>
             ) : (
@@ -108,7 +130,7 @@ function AnswerText({
 }) {
   const blocks = parseAnswer(text)
   return (
-    <div className="space-y-2 text-[15px] leading-relaxed text-slate-800">
+    <div className="space-y-2 text-[15px] leading-relaxed text-ink">
       {blocks.map((block, index) =>
         block.kind === 'list' ? (
           block.ordered ? (
@@ -142,103 +164,24 @@ function Row({ children }: { children: ReactNode }) {
   return <div className="flex flex-wrap items-center gap-1.5">{children}</div>
 }
 
-const TOOL_NAMES: Record<string, string> = {
-  search_wiki: 'поискал ещё раз',
-  read_section: 'дочитал раздел',
-  live_pipe: 'спросил сервис про трубу',
-  live_fleet: 'спросил сервис про парк',
-}
-
-/**
- * Что делал агент, человеческими словами.
- *
- * Это не украшение и не отладка. Агентский шаг меняет состав контекста, то
- * есть меняет ответ, — и делает это невидимо. Скрытый шаг, влияющий на
- * результат, человек рано или поздно обнаруживает по расхождению цифр и
- * перестаёт доверять всей системе. Дешевле показать сразу.
- *
- * Аргументы вызова печатаем как есть: именно по ним видно, что модель
- * искала своими словами, а не словами вопроса, — ради чего шаг и заведён.
- */
-function AgentSteps({ agent }: { agent: NonNullable<Exchange['meta']>['agent'] }) {
-  if (!agent) return null
-  if (!agent.used_tools) {
-    // Раньше здесь стояло безусловное «посмотрел и решил, что достаточно»
-    // — и это была неправда в половине случаев: модель могла просто не
-    // уметь вызывать инструменты. Пять запросов подряд выглядели как
-    // осознанные решения, а решений не было вовсе.
-    const decided = agent.mechanism !== 'не спрашивали'
-    return (
-      <div className="space-y-1 text-xs text-slate-500">
-        <p>
-          {decided
-            ? 'Агент посмотрел на найденное и решил, что инструменты не нужны.'
-            : 'Агент не дошёл до решения.'}{' '}
-          <span className="text-slate-400">способ: {agent.mechanism}</span>
-        </p>
-        {agent.declined_with ? (
-          <p className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-600">
-            ответ модели вместо вызова: «{agent.declined_with}»
-          </p>
-        ) : null}
-      </div>
-    )
-  }
-
-  return (
-    <div className="space-y-1">
-      {agent.steps.map((step) => (
-        <div
-          key={step.number}
-          className={cn(
-            'rounded-lg border px-2.5 py-1.5 text-xs',
-            step.ok ? 'border-slate-200 bg-white' : 'border-amber-200 bg-amber-50',
-          )}
-        >
-          <span className="font-medium text-slate-700">
-            {step.number}. {TOOL_NAMES[step.tool] ?? step.tool}
-          </span>
-          <span className="text-slate-500">
-            {' '}
-            {Object.entries(step.arguments)
-              // С именем поля, а не одним значением. «0.8» в строке про
-              // чтение раздела не объяснял ничего; «min_damage: 0.8»
-              // сразу показал бы, что в вызов уехал чужой аргумент.
-              .map(([name, value]) => `${name}: «${String(value)}»`)
-              .join(', ')}
-          </span>
-          <span className="ml-1 text-slate-500">
-            → {step.added > 0 ? `+${step.added} фрагм.` : 'ничего нового'}
-          </span>
-        </div>
-      ))}
-      <p className="text-xs text-slate-400">способ решения: {agent.mechanism}</p>
-      {agent.trail_cut ? (
-        <p className="text-xs text-amber-700">
-          Шаги кончились на полпути: последний вызов ещё приносил новое.
-        </p>
-      ) : null}
-    </div>
-  )
-}
-
 export function AnswerCard({ exchange }: { exchange: Exchange }) {
+  const [details, setDetails] = useState(false)
   const { phase, answer, meta, done, error } = exchange
   const text = displayText(exchange)
   const status = answer?.status
   const view = status ? STATUS_VIEW[status] : null
 
-  // Кто ответил на самом деле — из финального события, а не из meta: meta
-  // уходит до генерации и знает только намерение. Если вступил резерв, эти
-  // двое разойдутся, и показать надо настоящего.
-  const provider = done?.provider || meta?.provider || ''
-  const model = done?.model || meta?.model || ''
-  const local = provider === 'ollama'
-
-  // Документы, на которые реально сослался ответ. Не все найденные, а
-  // именно процитированные: список «что нашлось» лежит ниже, в разборе.
+  // Подпись к кнопке разбора: сколько источников и сколько шагов сделал
+  // агент. Числа стоят на кнопке, а не в ленте отдельными плашками —
+  // «2 источника» это не событие, о котором надо сообщать строкой.
   const citedNumbers = new Set((answer?.citations ?? []).map((citation) => citation.fragment))
-  const sources = (meta?.fragments ?? []).filter((fragment) => citedNumbers.has(fragment.number))
+  const steps = meta?.agent?.used_tools ? meta.agent.steps.length : 0
+  const summary = [
+    citedNumbers.size ? `${citedNumbers.size} источн.` : '',
+    steps ? `агент: ${steps}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
 
   // Адрес конкретного фрагмента внутри документа. Якорь обязателен: в
   // документе на сорок кусков ссылка «в документ» означает «ищи сам», и
@@ -257,42 +200,50 @@ export function AnswerCard({ exchange }: { exchange: Exchange }) {
   return (
     <article className="space-y-3">
       <div className="flex justify-end">
-        <p className="max-w-[85%] rounded-2xl rounded-br-md bg-slate-100 px-3.5 py-2 text-[15px] text-slate-800">
+        <p className="max-w-[85%] rounded-2xl rounded-br-md border border-line bg-surface px-3.5 py-2 text-[14.5px] leading-relaxed text-ink shadow-card">
           {exchange.question}
         </p>
       </div>
 
       <div className="flex gap-2.5">
-        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-600">
+        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
           <IconSparkle className="size-4" />
         </span>
 
         <div className="min-w-0 flex-1 space-y-2.5">
           <Row>
             {view ? <Badge tone={view.tone}>{view.label}</Badge> : null}
-            {phase === 'streaming' ? <Spinner label="модель отвечает" /> : null}
+            {phase === 'streaming' ? (
+              <Spinner label={exchange.step || 'модель отвечает'} />
+            ) : null}
             {phase === 'stopped' ? <Badge tone="neutral">остановлено вами</Badge> : null}
             {done?.finish_reason === 'length' ? (
               <Badge tone="warn">обрезано по лимиту токенов</Badge>
             ) : null}
+            {/* Текст замечания уехал в разбор.
+                «схема: статус «ответил» без единой цитаты — исправлен на
+                not_found» — это записка разработчика самому себе. В ленте
+                человеку нужен факт «проверка что-то поправила», а сама
+                формулировка — там же, где остальные подробности. */}
             {answer && !answer.schema_valid ? (
-              <Badge tone="warn">схема: {answer.schema_error}</Badge>
+              <Badge tone="warn">есть замечания проверки</Badge>
             ) : null}
             {answer && answer.citations_failed > 0 ? (
               <Badge tone="bad">ссылок не подтверждено: {answer.citations_failed}</Badge>
             ) : null}
-            {meta?.agent?.used_tools ? (
-              <Badge tone="info">агент: {meta.agent.steps.length} шаг(а)</Badge>
-            ) : null}
-            {meta?.fragments.some((fragment) => fragment.live) ? (
-              <Badge tone="warn">есть живые данные сервиса</Badge>
+            {/* Плашка «агент: N шагов» отсюда ушла на кнопку разбора.
+                Это описание того, как всё прошло, а не событие; в ленте
+                остаются только ярлык состояния и то, с чем что-то не так. */}
+            {exchange.datasets.length === 0 &&
+            meta?.fragments.some((fragment) => fragment.live) ? (
+              <Badge tone="live">есть живые данные сервиса</Badge>
             ) : null}
           </Row>
 
           {/* Ошибка — это состояние, а не текст поверх ответа: показываем её
               отдельно и НЕ стираем то, что человек уже прочитал. */}
           {error ? (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+            <div className="rounded-lg border border-bad/30 bg-bad-soft p-3 text-sm text-bad-ink">
               <p className="font-medium">{error.message}</p>
               {error.detail ? <p className="mt-1 text-xs opacity-80">{error.detail}</p> : null}
               {error.retry_after_s ? (
@@ -300,6 +251,14 @@ export function AnswerCard({ exchange }: { exchange: Exchange }) {
               ) : null}
             </div>
           ) : null}
+
+          {/* Таблицы ПЕРЕД текстом, и порядок здесь содержательный.
+              Человек спросил «дай топ 5 труб» — ему нужны трубы, а не
+              рассуждение о них. Данные приходят раньше ответа и по
+              времени: пока модель думает, таблица уже на экране. */}
+          {exchange.datasets.map((data) => (
+            <DataTable key={data.handle} data={data} />
+          ))}
 
           {text ? <AnswerText text={text} target={linkTo} /> : null}
 
@@ -309,7 +268,7 @@ export function AnswerCard({ exchange }: { exchange: Exchange }) {
               трубы в парке нет. Проверка цитат её пропустила — опор
               всего четыре, а строк в списке десять. */}
           {answer && answer.mismatched_refs?.length ? (
-            <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+            <p className="rounded-lg border border-bad/30 bg-bad-soft p-3 text-sm text-bad-ink">
               Числа рядом с этими обозначениями не совпадают с источником:{' '}
               <span className="font-semibold">{answer.mismatched_refs.join(', ')}</span>. Сверьте
               их по блоку источников ниже — там значения такие, какими их отдал сервис.
@@ -317,7 +276,7 @@ export function AnswerCard({ exchange }: { exchange: Exchange }) {
           ) : null}
 
           {answer && answer.unknown_refs?.length ? (
-            <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+            <p className="rounded-lg border border-bad/30 bg-bad-soft p-3 text-sm text-bad-ink">
               В ответе названы обозначения, которых нет в источниках:{' '}
               <span className="font-semibold">{answer.unknown_refs.join(', ')}</span>. Модель их
               не нашла, а составила — проверьте эти строки по сервису вручную.
@@ -332,169 +291,38 @@ export function AnswerCard({ exchange }: { exchange: Exchange }) {
           {answer?.status === 'need_clarification' &&
           answer.clarifying_question &&
           answer.clarifying_question.trim() !== text.trim() ? (
-            <p className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
+            <p className="rounded-lg border border-accent-line bg-accent-soft p-3 text-sm text-accent-ink">
               {answer.clarifying_question}
             </p>
           ) : null}
 
-          {answer && answer.citations.length > 0 ? (
-            <ul className="space-y-1">
-              {answer.citations.map((citation, index) => (
-                <li
-                  key={`${citation.fragment}-${index}`}
-                  className={cn(
-                    'rounded-lg border px-2.5 py-1.5 text-xs',
-                    citation.ok
-                      ? 'border-emerald-200 bg-emerald-50/60 text-emerald-900'
-                      : 'border-red-200 bg-red-50/60 text-red-900',
-                  )}
-                >
-                  <span className="font-semibold">[{citation.fragment}]</span>{' '}
-                  {citation.ok ? 'из документа' : `не подтверждена — ${citation.reason}`}
-                  {/*
-                    Показываем только то, что вырезано из документа. При
-                    неудачной опоре цитаты нет вообще — и это правильнее, чем
-                    показать человеку текст, который сочинила модель: он
-                    выглядит ровно как настоящий, и отличить их на экране
-                    нельзя.
-                  */}
-                  {citation.quote ? (
-                    <span className="mt-0.5 block opacity-80">«{citation.quote}»</span>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {sources.length > 0 ? (
-            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-2.5">
-              <p className="px-0.5 pb-1.5 text-xs font-semibold text-slate-500">Источники</p>
-              <ul className="space-y-1">
-                {sources.map((fragment) => {
-                  const inside = (
-                    <>
-                      {fragment.live ? (
-                        <IconCloud className="mt-0.5 size-4 shrink-0 text-amber-500" />
-                      ) : (
-                        <IconDoc className="mt-0.5 size-4 shrink-0 text-slate-400" />
-                      )}
-                      <span className="min-w-0">
-                        <span className="block truncate text-xs font-medium text-slate-800">
-                          [{fragment.number}] {fragment.doc_title}
-                        </span>
-                        <span className="block truncate text-xs text-slate-500">
-                          {fragment.heading_path}
-                          {fragment.live ? '' : ` · ред. ${fragment.doc_version}`}
-                        </span>
-                      </span>
-                    </>
-                  )
-                  // Живой источник — не ссылка, а карточка с пометкой. Он
-                  // никуда не ведёт и означает «снимок на момент запроса»,
-                  // а не «так написано в документе».
-                  return (
-                    <li key={fragment.number}>
-                      {fragment.live ? (
-                        <div className="flex items-start gap-2 rounded-lg bg-amber-50/70 px-2.5 py-2 ring-1 ring-amber-200">
-                          {inside}
-                        </div>
-                      ) : (
-                        <Link
-                          to={`/wiki/${encodeURIComponent(fragment.doc_id)}#chunk-${fragment.chunk_id}`}
-                          className="flex items-start gap-2 rounded-lg bg-white px-2.5 py-2 ring-1 ring-slate-200 transition hover:ring-slate-300"
-                        >
-                          {inside}
-                        </Link>
-                      )}
-                    </li>
-                  )
-                })}
-              </ul>
+          {/* ОДНА КНОПКА ВМЕСТО ДВУХСОТ СТРОК.
+              Цитаты, источники, шаги агента, замеры поиска и полные тексты
+              всех найденных фрагментов стояли прямо здесь, под каждым
+              ответом. Всё это нужно — и нужно редко, а места занимало
+              больше, чем сам ответ: после двух вопросов до нужного места в
+              переписке было не докрутить. */}
+          {meta || (answer && answer.citations.length > 0) ? (
+            <div>
+              <button
+                type="button"
+                onClick={() => setDetails(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-[11px] text-ink-soft transition hover:border-accent-line hover:text-ink"
+              >
+                <IconInfo className="size-3.5" />
+                разбор
+                {summary ? <span className="text-ink-faint">· {summary}</span> : null}
+              </button>
             </div>
           ) : null}
 
-          {meta?.agent ? (
-            <Disclosure summary="что делал агент">
-              <AgentSteps agent={meta.agent} />
-            </Disclosure>
-          ) : null}
-
-          {meta ? (
-            <Disclosure summary="как получен ответ">
-              <dl className="space-y-1">
-                <Field label="лучшая близость">
-                  {similarity(meta.retrieval.best_cosine)} при пороге{' '}
-                  {similarity(meta.retrieval.floor)}{' '}
-                  {meta.retrieval.passed_floor ? '(прошло)' : '(ниже порога)'}
-                </Field>
-                <Field label="найдено фрагментов">
-                  {meta.retrieval.hits_total}, дублей убрано {meta.retrieval.duplicates_dropped}
-                </Field>
-                <Field label="отвечала модель">
-                  <span className="inline-flex items-center gap-1.5">
-                    {local ? <IconCpu className="size-3.5" /> : <IconCloud className="size-3.5" />}
-                    {model || '—'} · провайдер {provider || '—'}
-                  </span>
-                  {/* Расхождение показываем прямо здесь: подмена ответчика
-                      молча — это то, из-за чего потом не сходятся замеры. */}
-                  {meta.model && model && meta.model !== model ? (
-                    <span className="mt-0.5 block text-amber-700">
-                      выбирали {meta.model}, но ответил резерв
-                    </span>
-                  ) : null}
-                </Field>
-                <Field label="эмбеддинги">{meta.embed_model}</Field>
-                <Field label="версия промпта">{meta.prompt_version}</Field>
-                {/* Чем НА САМОМ ДЕЛЕ искали. Показываем, только если вопрос
-                    переписали с опорой на переписку: иначе строка «искали
-                    тем же, что вы написали» была бы шумом на каждом
-                    первом вопросе. А вот когда переписали — без неё
-                    «нашлось не то» не разобрать: человек видит свой
-                    вопрос, а поиск шёл по другому. */}
-                {meta.history?.search_question ? (
-                  <Field label="искали по">
-                    «{meta.history.search_question}»
-                    <span className="mt-0.5 block text-slate-400">
-                      вопрос дополнен по переписке ({meta.history.turns} реплик)
-                    </span>
-                  </Field>
-                ) : null}
-                {done ? (
-                  <>
-                    <Field label="токены">
-                      {tokens(done.usage.prompt_tokens, done.usage.completion_tokens)}
-                    </Field>
-                    <Field label="стоимость">{cost(done.usage.cost_rub, local)}</Field>
-                    <Field label="до первого токена">{ms(done.timing.ttft_ms)}</Field>
-                    <Field label="причина остановки">
-                      {done.finish_reason} / {done.stop_reason}
-                    </Field>
-                    <Field label="трейс">{done.trace_id}</Field>
-                  </>
-                ) : null}
-              </dl>
-
-              {meta.fragments.length > 0 ? (
-                <ol className="mt-3 space-y-2">
-                  {meta.fragments.map((fragment) => (
-                    <li
-                      key={fragment.number}
-                      className="rounded-lg border border-slate-200 bg-white p-2"
-                    >
-                      <p className="text-xs font-medium text-slate-700">
-                        [{fragment.number}] {fragment.source_label}
-                      </p>
-                      <p className="mt-0.5 text-xs text-slate-500">
-                        найден: {fragment.found_by} · косинус {similarity(fragment.cosine)} · RRF{' '}
-                        {fragment.rrf.toFixed(4)}
-                      </p>
-                      <p className="mt-1 line-clamp-4 text-xs text-slate-700">{fragment.body}</p>
-                    </li>
-                  ))}
-                </ol>
-              ) : null}
-            </Disclosure>
-          ) : null}
+          <Drawer
+            open={details}
+            title={`Разбор: «${exchange.question}»`}
+            onClose={() => setDetails(false)}
+          >
+            <AnswerDetails exchange={exchange} />
+          </Drawer>
         </div>
       </div>
     </article>

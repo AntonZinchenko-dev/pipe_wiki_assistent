@@ -77,7 +77,7 @@ export function AppShell({ children, aside }: { children: ReactNode; aside: Reac
   }, [panel])
 
   return (
-    <div className="flex h-dvh flex-col bg-slate-50 text-slate-900">
+    <div className="flex h-dvh flex-col bg-canvas text-ink">
       <TopBar
         assistantOpen={panel !== 'closed'}
         onToggleAssistant={() => setPanel((value) => (value === 'closed' ? 'side' : 'closed'))}
@@ -86,7 +86,7 @@ export function AppShell({ children, aside }: { children: ReactNode; aside: Reac
       {/* relative нужен узкому экрану: там панель ложится поверх
           содержимого, и ей нужна точка отсчёта. */}
       <div className="relative flex min-h-0 flex-1">
-        <SideNav />
+        <SideNav onAskAssistant={() => setPanel((value) => (value === 'closed' ? 'side' : value))} />
 
         <main
           className={cn(
@@ -96,25 +96,27 @@ export function AppShell({ children, aside }: { children: ReactNode; aside: Reac
             panel === 'full' && 'hidden',
           )}
         >
-          <div className="mx-auto w-full max-w-4xl px-6 py-6">{children}</div>
+          <div className="mx-auto w-full max-w-4xl px-6 py-7">{children}</div>
         </main>
 
         {panel !== 'closed' ? (
           <section
             className={cn(
-              'flex min-h-0 flex-col border-l border-slate-200 bg-white',
+              'flex min-h-0 flex-col border-l border-line bg-chrome',
               panel === 'full'
                 ? 'flex-1'
                 : // Узкий экран: поверх содержимого. Широкий: своя колонка.
-                  'absolute inset-y-0 right-0 z-20 w-full max-w-[420px] shadow-xl xl:static xl:w-[420px] xl:shrink-0 xl:shadow-none',
+                  'absolute inset-y-0 right-0 z-20 w-full max-w-[440px] shadow-panel xl:static xl:w-[440px] xl:shrink-0 xl:shadow-none',
             )}
           >
-            <div className="flex h-12 shrink-0 items-center gap-2 border-b border-slate-200 px-4">
-              <IconSparkle className="size-4 text-sky-600" />
-              <span className="text-sm font-semibold text-slate-900">Ассистент</span>
-              <span className="hidden rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 sm:inline">
-                по документам вики
-              </span>
+            <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line bg-chrome px-4">
+              <IconSparkle className="size-4 text-accent" />
+              <span className="text-sm font-semibold text-ink">Ассистент</span>
+              {/* Пояснение — служебным тоном, а не зелёной плашкой.
+                  Зелёный означает «работает», а тут просто сказано, по
+                  чему ассистент отвечает. Плашка того же цвета, что и
+                  «провайдер на связи», заставляла читать её как состояние. */}
+              <span className="hidden text-xs text-ink-faint sm:inline">по документам вики</span>
 
               <div className="ml-auto flex items-center gap-1">
                 <button
@@ -122,7 +124,7 @@ export function AppShell({ children, aside }: { children: ReactNode; aside: Reac
                   onClick={() => setPanel(panel === 'full' ? 'side' : 'full')}
                   aria-label={panel === 'full' ? 'свернуть в панель' : 'развернуть на весь экран'}
                   title={panel === 'full' ? 'свернуть в панель' : 'развернуть на весь экран'}
-                  className="flex size-7 items-center justify-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                  className="flex size-7 items-center justify-center rounded-md text-ink-faint transition hover:bg-sunken hover:text-ink"
                 >
                   <IconPanel className="size-4" />
                 </button>
@@ -130,7 +132,7 @@ export function AppShell({ children, aside }: { children: ReactNode; aside: Reac
                   type="button"
                   onClick={() => setPanel('closed')}
                   aria-label="закрыть панель ассистента"
-                  className="flex size-7 items-center justify-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                  className="flex size-7 items-center justify-center rounded-md text-ink-faint transition hover:bg-sunken hover:text-ink"
                 >
                   <IconClose className="size-4" />
                 </button>

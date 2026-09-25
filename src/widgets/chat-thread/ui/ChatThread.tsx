@@ -58,26 +58,33 @@ export function ChatThread() {
     <section className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
         {exchanges.length === 0 ? (
-          <div className="space-y-4">
+          <div className="space-y-5 pt-2">
             <div>
-              <h2 className="text-lg font-semibold text-slate-900">
+              <span className="mb-3 flex size-9 items-center justify-center rounded-xl bg-accent-soft text-accent">
+                <IconSparkle className="size-5" />
+              </span>
+              <h2 className="text-[17px] font-semibold tracking-tight text-ink">
                 Спросите о чём угодно из вики
               </h2>
-              <p className="mt-1 text-sm leading-relaxed text-slate-600">
+              <p className="mt-1.5 text-[13.5px] leading-relaxed text-ink-soft">
                 Ассистент отвечает только по документам вики и обязан ссылаться на фрагменты.
                 Если ответа в документации нет, он скажет это прямо, а не придумает.
               </p>
             </div>
-            <div className="flex flex-wrap gap-1.5">
+            {/* Примеры — в столбик, а не облаком плиток.
+                Облаком они были разной ширины и переносились по-разному на
+                каждой ширине панели; список читается сверху вниз и всегда
+                выглядит одинаково. */}
+            <div className="flex flex-col gap-1.5">
               {EXAMPLES.map((example) => (
                 <button
                   key={example}
                   type="button"
                   onClick={() => submit(example)}
-                  className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-left text-xs text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
+                  className="group flex items-center gap-2.5 rounded-lg border border-line bg-surface px-3 py-2.5 text-left text-[13px] text-ink-soft shadow-card transition hover:border-accent-line hover:text-ink"
                 >
-                  <IconSparkle className="size-3.5 shrink-0 text-sky-500" />
-                  <span>{example}</span>
+                  <IconSparkle className="size-3.5 shrink-0 text-ink-faint transition group-hover:text-accent" />
+                  <span className="min-w-0 flex-1">{example}</span>
                 </button>
               ))}
             </div>
@@ -89,13 +96,13 @@ export function ChatThread() {
       </div>
 
       <form
-        className="shrink-0 border-t border-slate-200 bg-white p-3"
+        className="shrink-0 border-t border-line bg-surface p-3"
         onSubmit={(event) => {
           event.preventDefault()
           submit(draft)
         }}
       >
-        <div className="rounded-xl border border-slate-200 bg-white focus-within:border-slate-400">
+        <div className="rounded-xl border border-line bg-surface shadow-card transition focus-within:border-accent-line focus-within:shadow-raised">
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
@@ -107,28 +114,33 @@ export function ChatThread() {
             }}
             rows={2}
             placeholder="Вопрос по документации…"
-            className="min-h-16 w-full resize-y rounded-xl px-3 py-2.5 text-sm outline-none"
+            className="min-h-16 w-full resize-y rounded-xl bg-transparent px-3 py-2.5 text-sm text-ink outline-none placeholder:text-ink-faint"
           />
           <div className="flex items-center justify-between gap-2 px-2 pb-2">
-            <span className="pl-1 text-xs text-slate-400">Enter — отправить</span>
+            {/* Подсказка прячется на узкой панели.
+                Целиком она не помещается рядом с кнопками и переносится на
+                вторую строку, растаскивая низ формы. Человеку, у которого
+                панель узкая, важнее видеть кнопку «Спросить», чем
+                напоминание про Shift+Enter. */}
+            <span className="hidden pl-1 text-[11px] text-ink-faint sm:block">
+              <kbd className="font-sans">Enter</kbd> — отправить
+            </span>
             <div className="flex items-center gap-2">
               {exchanges.length > 0 && !streaming ? (
-                <Button variant="ghost" onClick={startNew}>
+                <Button variant="quiet" size="sm" onClick={startNew}>
                   Новый диалог
                 </Button>
               ) : null}
               {/* Кнопка «Стоп» доступна ровно в фазе потока — это следствие
                   явного автомата состояний, а не отдельного флага isLoading. */}
               {streaming ? (
-                <Button variant="danger" onClick={stop}>
+                <Button variant="danger" size="sm" onClick={stop}>
                   Стоп
                 </Button>
               ) : (
-                <Button type="submit" disabled={!draft.trim()}>
-                  <span className="flex items-center gap-1.5">
-                    Спросить
-                    <IconSend className="size-4" />
-                  </span>
+                <Button type="submit" size="sm" disabled={!draft.trim()}>
+                  Спросить
+                  <IconSend className="size-3.5" />
                 </Button>
               )}
             </div>

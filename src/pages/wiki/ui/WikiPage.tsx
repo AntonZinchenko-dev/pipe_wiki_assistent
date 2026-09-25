@@ -20,7 +20,7 @@ export function WikiPage() {
   if (isLoading) return <Spinner label="загружаю список документов" />
   if (error) {
     return (
-      <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+      <p className="rounded-lg border border-bad/30 bg-bad-soft p-3 text-sm text-bad-ink">
         Не удалось загрузить список: {(error as Error).message}
       </p>
     )
@@ -46,17 +46,17 @@ export function WikiPage() {
   return (
     <div className="space-y-6">
       <header className="space-y-2">
-        <h1 className="text-2xl font-semibold text-slate-900">
+        <h1 className="text-[26px] font-semibold tracking-tight text-ink">
           {project || 'Документы вики'}
         </h1>
-        <p className="text-sm text-slate-600">
+        <p className="text-[13.5px] text-ink-soft">
           {filtered.length} из {all.length} документов
           {query ? ` по запросу «${params.get('q')}»` : ''}
         </p>
         {project || query ? (
           <Link
             to="/wiki"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 transition hover:bg-slate-50"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs text-ink-soft transition hover:bg-sunken"
           >
             <IconClose className="size-3.5" />
             сбросить фильтр
@@ -65,7 +65,7 @@ export function WikiPage() {
       </header>
 
       {filtered.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-slate-300 p-6 text-sm text-slate-500">
+        <p className="rounded-xl border border-dashed border-line bg-surface p-6 text-center text-sm text-ink-soft">
           Ничего не нашлось. Обычный поиск ищет по названию и коду документа — если нужен
           поиск по смыслу, спросите ассистента справа.
         </p>
@@ -73,7 +73,7 @@ export function WikiPage() {
 
       {[...byProject.entries()].map(([group, documents]) => (
         <section key={group} className="space-y-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
             {group}
           </h2>
           <div className="space-y-1.5">

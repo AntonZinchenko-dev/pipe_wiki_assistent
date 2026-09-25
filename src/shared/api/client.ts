@@ -72,6 +72,22 @@ export async function fetchModels(signal?: AbortSignal): Promise<{
  */
 export type ChatTurn = { role: 'user' | 'assistant'; content: string }
 
+/**
+ * Таблица, уже показанная человеку, и метка её следующей страницы.
+ *
+ * Пагинацией владеет тот, кто листает. Сервер здесь без памяти, таблицы
+ * лежат в браузере — значит вернуть курсор обязан браузер, ровно как
+ * обычный клиент возвращает `next_page_token`.
+ */
+export type OpenTableRef = {
+  handle: string
+  title: string
+  offset: number
+  shown: number
+  total_found: number
+  next_cursor: string
+}
+
 export async function postChat(
   question: string,
   choice: { provider: string; model: string } | null,
@@ -79,6 +95,7 @@ export async function postChat(
   signal: AbortSignal,
   history: ChatTurn[] = [],
   summary = '',
+  openTables: OpenTableRef[] = [],
 ): Promise<Response> {
   const response = await fetch(`${BASE}/chat`, {
     method: 'POST',
@@ -93,6 +110,12 @@ export async function postChat(
       // прогонами было бы нельзя.
       ...(history.length ? { history } : {}),
       ...(summary ? { summary } : {}),
+      // Курсоры таблиц, которые человек видит на экране.
+      //
+      // Сервер диалогов не помнит, а таблицы живут здесь. Без этого поля
+      // «следующие 5» упиралось в догадку: агент запрашивал первые десять
+      // заново и показывал те же строки второй раз.
+      ...(openTables.length ? { open_tables: openTables } : {}),
     }),
     signal,
   })
