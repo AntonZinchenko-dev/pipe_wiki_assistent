@@ -1,0 +1,34 @@
+@import 'tailwindcss';
+
+/* Токены темы держим в CSS-переменных — как в pipepass, чтобы переключение
+   темы не требовало пересборки классов. Тёмная тема появится вместе с
+   остальным интерфейсом, здесь заложено только место под неё. */
+:root {
+  --c-bg: theme(colors.slate.50);
+  --c-surface: white;
+  --c-text: theme(colors.slate.900);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  background: var(--c-bg);
+  color: var(--c-text);
+}
+
+/* Поток текста не должен «дёргать» страницу при каждом кадре: явная
+   стабилизация переносов делает рост ответа спокойным. */
+.whitespace-pre-wrap {
+  overflow-wrap: anywhere;
+}
