@@ -1,0 +1,50 @@
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Байткод Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Секреты (шаблон .env.example коммитим)
+.env
+.env.*
+!.env.example
+
+# Приватные ключи; публичные корневые сертификаты (*.cer) коммитим
+certs/*.key
+certs/*.pem
+certs/*.p12
+certs/*.pfx
+
+# Индекс, SQLite, трейсы, отчёты eval — собираются из корпуса
+var/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+
+# Тесты и инструменты
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Сборка пакета
+build/
+dist/
+*.egg-info/
+
+# Логи
+*.log
+
+# ОС и редакторы
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "useDefineForClassFields": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    // Матчеры jest-dom (`toBeInTheDocument`) регистрируются в
+    // vitest.setup.ts, но ТИПЫ их надо объявить и здесь: иначе тесты
+    // проходят, а `npm run typecheck` падает — и проверка, которая
+    // расходится с прогоном, хуже отсутствующей.
+    "types": ["vitest/globals", "@testing-library/jest-dom"],
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["src"]
+}

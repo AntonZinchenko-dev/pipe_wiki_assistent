@@ -1,31 +1,21 @@
-# Зависимости
-node_modules/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
 
-# Сборка
+# Индекс и трейсы: собираются из корпуса, в репозитории им не место
+backend/var/
+
+# Node
+node_modules/
 dist/
-dist-ssr/
 dist-preview/
 .vite/
-*.tsbuildinfo
-
-# Тесты
-coverage/
-
-# Секреты (шаблон .env.example коммитим)
-.env
-.env.*
-!.env.example
-
-# Логи
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-*.log
 
 # ОС и редакторы
 .DS_Store
 Thumbs.db
 .idea/
-.vscode/*
-!.vscode/extensions.json
+.vscode/
