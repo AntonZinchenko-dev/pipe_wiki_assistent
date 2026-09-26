@@ -36,6 +36,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import time
 import uuid
 from pathlib import Path
@@ -225,40 +227,89 @@ class GigaChatProvider:
             payload["function_call"] = "auto"
 
 
-        emitted_text = False
-        try:
-            async with self._client.stream(
-                "POST", API_URL, json=payload,
-                headers={"Authorization": f"Bearer {token}", "Accept": "text/event-stream"},
-                timeout=httpx.Timeout(
-                    self._s.request_timeout_s,
-                    connect=self._s.connect_timeout_s,
-                    read=self._s.stream_idle_timeout_s,
-                ),
-            ) as response:
-                if response.status_code >= 400:
-                    body = (await response.aread()).decode("utf-8", "replace")[:300]
-                    raise ProviderError(
-                        f"gigachat {response.status_code}: {body}",
-                        retryable=response.status_code in RETRYABLE_STATUS,
-                        status=response.status_code,
-                        retry_after_s=parse_retry_after(response.headers.get("retry-after")),
-                        provider=self.name,
-                    )
-                async for chunk in _iter_sse(
-                    response, rub_per_1k=self._s.gigachat_rub_per_1k
-                ):
-                    if chunk.text:
-                        emitted_text = True
-                    yield chunk
-        except httpx.HTTPError as error:
-            self._breaker.record_failure()
-            raise ProviderError(
-                f"gigachat: обрыв потока ({error})",
-                retryable=not emitted_text, provider=self.name,
-            ) from error
-        else:
-            self._breaker.record_success()
+        # ПОВТОРЫ ПОТОКА, И ГРАНИЦА ИХ БЕЗОПАСНОСТИ.
+        #
+        # Здесь их не было вовсе: предохранитель стоял, повторов не стояло.
+        # То есть 503 или 429 от сервиса ДО первого токена ронял запрос
+        # целиком, хотя повторить было можно и безопасно — а у локального
+        # провайдера ровно в этом месте повтор давно работал. Два адаптера
+        # одной системы вели себя по-разному на одной и той же беде.
+        #
+        # Граница — НЕ «не было текста», а «не было отдано ни одного куска».
+        # Куски бывают без текста (служебные), и если такой уже ушёл наверх,
+        # повтор продублирует его в разборе.
+        #
+        # Аналогия: переспросить собеседника можно, пока он не начал
+        # отвечать. Сказал первое слово — поздно, слушаем до конца или
+        # честно признаём обрыв.
+        for attempt in range(1, self._retry.attempts + 1):
+            self._breaker.ensure_closed()
+            yielded = 0
+            failure: ProviderError | None = None
+
+            try:
+                async with self._client.stream(
+                    "POST", API_URL, json=payload,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "text/event-stream",
+                    },
+                    timeout=httpx.Timeout(
+                        self._s.request_timeout_s,
+                        connect=self._s.connect_timeout_s,
+                        read=self._s.stream_idle_timeout_s,
+                    ),
+                ) as response:
+                    if response.status_code >= 400:
+                        body = (await response.aread()).decode("utf-8", "replace")[:300]
+                        failure = ProviderError(
+                            f"gigachat {response.status_code}: {body}",
+                            retryable=response.status_code in RETRYABLE_STATUS,
+                            status=response.status_code,
+                            retry_after_s=parse_retry_after(
+                                response.headers.get("retry-after")
+                            ),
+                            provider=self.name,
+                        )
+                    else:
+                        async for chunk in _iter_sse(
+                            response, rub_per_1k=self._s.gigachat_rub_per_1k
+                        ):
+                            yielded += 1
+                            yield chunk
+            except httpx.HTTPError as error:
+                failure = ProviderError(
+                    f"gigachat: обрыв потока ({error})",
+                    # Обрыв ПОСЛЕ первого куска неповторяем по построению:
+                    # человек уже видит начало ответа, и второй заход
+                    # покажет его дважды.
+                    retryable=yielded == 0,
+                    provider=self.name,
+                )
+                failure.__cause__ = error
+
+            if failure is None:
+                self._breaker.record_success()
+                return
+
+            # Отказ записываем только для временных кодов. 400 и 401 — наш
+            # собственный неверный запрос, и открывать на нём предохранитель
+            # значит объявлять провайдера недоступным за свою же ошибку.
+            if failure.retryable:
+                self._breaker.record_failure()
+
+            if not (failure.retryable and yielded == 0 and attempt < self._retry.attempts):
+                raise failure
+
+            await asyncio.sleep(self._retry.delay_for(attempt, failure.retry_after_s))
+            # ТОКЕН ОБНОВЛЯЕМ ПЕРЕД КАЖДЫМ ПОВТОРОМ.
+            #
+            # Пауза по Retry-After бывает в минуту, а токен Сбера живёт
+            # тридцать минут и мог истечь как раз в ней. Повтор со старым
+            # токеном вернул бы 401 — то есть неповторяемую ошибку, и
+            # выглядело бы это как «сервис отказал», а не как «мы пришли с
+            # просроченным пропуском».
+            token = await self._ensure_token()
 
     async def list_models(self) -> list[str]:
         """Какие модели доступны ЭТОМУ счёту.

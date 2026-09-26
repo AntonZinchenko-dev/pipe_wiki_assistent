@@ -35,6 +35,8 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.access import ROLE_DATA_READER, RIGHT_AGENT, User, parse_roles
+from app.agent import agent_version  # noqa: E402
 from app.config import get_settings, overridden_from_env  # noqa: E402
 from app.pipeline import Pipeline  # noqa: E402
 from app.providers import build_registry  # noqa: E402
@@ -101,6 +103,7 @@ def report_env_overrides(settings) -> None:
 def make_config(
     *, label: str, mode: str, settings, store: Store, note: str = "",
     providers=None, agent: bool = False, prompt_version: str = "",
+    run_as: str = "",
 ) -> RunConfig:
     stats = store.stats()
     return RunConfig(
@@ -126,6 +129,10 @@ def make_config(
         # между ними будет прочитана как разброс.
         agent=agent,
         agent_max_steps=settings.agent_max_steps if agent else 0,
+        agent_max_tokens=settings.agent_max_tokens if agent else 0,
+        agent_version=agent_version() if agent else "",
+        agent_decision=settings.agent_decision if agent else "",
+        run_as=run_as,
         restricted_projects=settings.restricted_projects,
         embed_model=settings.ollama_embed_model,
         # Версия ТОГО промпта, которым отвечали, а не константа модуля.
@@ -146,6 +153,7 @@ def make_config(
         context_max_fragments=settings.context_max_fragments,
         context_token_budget=settings.context_token_budget,
         temperature=settings.temperature,
+        seed=settings.seed,
         rrf_k=settings.rrf_k,
         keyword_weight=settings.keyword_weight,
         index_meta=stats["meta"],
@@ -617,6 +625,7 @@ async def _sensitivity(args) -> int:
         store=store,
         think=settings.judge_think,
         max_tokens=settings.judge_max_tokens,
+        seed=settings.seed,
     )
 
     # Итог: по каждому виду порчи — сколько поймала подстрока и сколько судья.
@@ -859,6 +868,29 @@ async def _answer(args) -> int:
     # Мы на это уже попались: первый же прогон агентского набора ушёл без
     # флага `--agent`, и двенадцать вопросов доложили о провале, которого не
     # было.
+    # ОТ ЧЬЕГО ИМЕНИ ИДЁТ ПРОГОН.
+    #
+    # Раньше — от анонима, у которого нет ни права на агента, ни на чтение
+    # живых данных. Конвейер молча пропускал агентский шаг, и `tools_ok`
+    # выходил нулём: выглядело как поломка агента, а агента не пускали.
+    #
+    # В проде человек аутентифицирован и роль у него есть, значит прогон
+    # обязан идти с ролью — иначе он измеряет систему, которой никто не
+    # пользуется. Роль записывается в конфигурацию прогона: сравнивать
+    # прогоны с разными правами нельзя, и это должно быть видно.
+    run_as = User(
+        name="прогон",
+        roles=parse_roles(getattr(args, "as_role", "") or ROLE_DATA_READER),
+    )
+    if use_agent and not run_as.may(RIGHT_AGENT):
+        print(f"РОЛЬ ПРОГОНА «{', '.join(sorted(run_as.roles)) or 'без ролей'}» НЕ ДАЁТ ПРАВА НА АГЕНТА.")
+        print("  Агентский шаг был бы пропущен молча, а tools_ok вышел бы нулём —")
+        print("  и выглядело бы это как поломка агента, а не как отсутствие прав.")
+        print("  Укажите --as-role data-reader (или ops, data-admin).")
+        store.close()
+        await client.aclose()
+        return
+
     live = [question for question in questions if question.type == "live"]
     if live and not use_agent:
         print(
@@ -887,6 +919,7 @@ async def _answer(args) -> int:
             store=store,
             think=settings.judge_think,
             max_tokens=settings.judge_max_tokens,
+            seed=settings.seed,
         )
 
     config = make_config(
@@ -895,6 +928,7 @@ async def _answer(args) -> int:
         # отвечала, а не та, что прописана у локального провайдера.
         providers=providers,
         agent=use_agent,
+        run_as=",".join(sorted(run_as.roles)) or "аноним",
         prompt_version=spec.version,
     )
     path = runs_dir() / (
@@ -917,7 +951,7 @@ async def _answer(args) -> int:
     try:
         rows = await run_answer(
             questions, pipeline=pipeline, judge=judge, on_progress=checkpoint,
-            agent=use_agent,
+            agent=use_agent, user=run_as,
         )
     finally:
         # Освобождаем видеопамять от отвечающей модели: следующим шагом,
@@ -1022,6 +1056,7 @@ async def _judge(args) -> int:
         store=store,
         think=settings.judge_think,
         max_tokens=settings.judge_max_tokens,
+        seed=settings.seed,
     )
 
     if args.probe:
@@ -2131,6 +2166,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt", default="",
         help="версия промпта из реестра (по умолчанию — активная, PW_PROMPT_NAME). "
              "Два прогона с разными версиями сравниваются командой compare",
+    )
+    answer.add_argument(
+        "--as-role", default="data-reader",
+        help="роль, от имени которой идёт прогон. По умолчанию data-reader: "
+             "она даёт и агента, и чтение живых данных. Аноним не даёт ничего, "
+             "и прогон под ним измеряет систему, которой никто не пользуется",
     )
     answer.add_argument(
         "--agent", action="store_true",

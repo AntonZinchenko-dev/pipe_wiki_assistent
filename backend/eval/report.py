@@ -82,7 +82,9 @@ def summarize(run: dict) -> str:
     lines.append(
         f"модель {config['chat_model']} · эмбеддинги {config['embed_model']} · "
         f"промпт {config['prompt_version']} · код {config.get('code_version', '—')} · "
-        f"разметка поиска {config.get('labels_retrieval', '—')} / "
+        + (f"роль {config['run_as']} · " if config.get("run_as") else "")
+        + (f"агент {config['agent_version']} · " if config.get("agent_version") else "")
+        + f"разметка поиска {config.get('labels_retrieval', '—')} / "
         f"ответа {config.get('labels_answer', '—')}"
     )
     lines.append(
@@ -292,6 +294,10 @@ def summarize(run: dict) -> str:
                 f"{row['retrieval'].get('chunk_rank', 0)}  "
                 f"{'; '.join(why):<28} {row['question'][:44]}"
             )
+            # Причина у статуса `error` известна системе — печатаем её здесь,
+            # а не заставляем открывать файл прогона.
+            if row.get("schema_error"):
+                lines.append(f"      причина: {row['schema_error'][:96]}")
         lines.append("")
 
     # Непрошедшие ссылки — с причиной и с тем, что указала модель.
@@ -306,6 +312,32 @@ def summarize(run: dict) -> str:
                     f"  {row['question_id']}  [{citation.get('fragment')}]  "
                     f"{citation.get('reason', '')[:44]:<46} {citation.get('handle', '')[:60]!r}"
                 )
+        lines.append("")
+
+    # АГЕНТ: ЧТО ЖДАЛИ, ЧТО ПОЗВАЛ, ЧЕМ ОБЪЯСНИЛ.
+    #
+    # `tools_ok 0.000` — число без диагноза. По нему не отличить «решил, что
+    # инструменты не нужны» от «позвал не тот» и от «не умеет вызывать
+    # вовсе»; это три болезни и три ремонта. Разбирать их по файлу прогона
+    # руками мы уже пробовали — дорого и каждый раз заново.
+    wrong_tools = [row for row in rows if row.get("tools_ok") is False]
+    if wrong_tools:
+        lines.append(f"АГЕНТ ПОЗВАЛ НЕ ТО ({len(wrong_tools)})")
+        for row in wrong_tools[:12]:
+            expected = ", ".join(row.get("tools_expected") or []) or "—"
+            actual = ", ".join(row.get("tools_used") or []) or "ничего не звал"
+            lines.append(
+                f"  {row['question_id']}  ждали {expected:<18} позвал {actual:<28} "
+                f"способ: {row.get('agent_mechanism') or '—'}"
+            )
+            said = row.get("agent_declined") or ""
+            if said and "обрыв" in (row.get("agent_mechanism") or ""):
+                # У оборванного бланка интересен ХВОСТ: там видно, на чём
+                # модель срезало и сколько ей не хватило. Голова бланка при
+                # обрыве всегда одна и та же — начало поля `why`.
+                lines.append(f"      бланк не дописан, оборвано на: «…{said[-90:]}»")
+            elif said:
+                lines.append(f"      вместо вызова ответил: «{said[:90]}»")
         lines.append("")
 
     worst = [

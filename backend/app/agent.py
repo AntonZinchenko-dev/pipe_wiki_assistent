@@ -39,6 +39,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 from .config import Settings
@@ -123,6 +124,33 @@ AGENT_PROMPT_NATIVE = AGENT_PROMPT + """
 либо слово ХВАТИТ — третьего варианта ответа здесь нет."""
 
 
+def agent_version() -> str:
+    """Отпечаток ВСЕГО, чем агент принимает решение.
+
+    Промпты ответа у нас живут в реестре версий: у каждой имя, отпечаток
+    содержимого и запись в журнале каждого запроса. У агента этого не было
+    — и это стоило мне прогона. Я поменял бланк решения и список
+    инструментов, а в шапке прогона поменялась одна строка: `код`. По ней
+    видно, что код другой, и не видно, ЧТО в нём другое: правка агента,
+    правка поиска и опечатка в комментарии выглядят одинаково.
+
+    Считается от трёх вещей вместе, потому что решение принимают они втроём:
+    текст промпта, набор полей бланка и описания инструментов. Имена
+    инструментов в бланк подставляются по правам человека, поэтому в
+    отпечаток идёт полный набор — отпечаток описывает КОД, а не отдельный
+    запрос.
+    """
+    from .rag.tools import LIVE_SPECS, tool_specs
+
+    material = "".join([
+        AGENT_PROMPT,
+        AGENT_PROMPT_NATIVE,
+        str(sorted(decision_schema([])["properties"])),
+        str(tool_specs() + list(LIVE_SPECS)),
+    ])
+    return f"agent-1.0+{hashlib.sha256(material.encode()).hexdigest()[:8]}"
+
+
 def decision_schema(tools: list[dict]) -> dict:
     """Бланк решения для моделей, которые не умеют вызывать функции.
 
@@ -142,8 +170,44 @@ def decision_schema(tools: list[dict]) -> dict:
     return {
         "type": "object",
         "properties": {
-            "why": {"type": "string"},
-            "action": {"type": "string", "enum": ["ХВАТИТ", *names]},
+            # Граница длины: `why` идёт первым, генерация авторегрессивная —
+            # без границы модель тратит на обоснование бюджет, которого потом
+            # не хватает на `action`. Порядок полей менять нельзя (`status`
+            # первым стоил нам 60 отказов из 67), поэтому ограничиваем не
+            # порядок, а длину.
+            "why": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "Одна короткая фраза: к какому пункту относится вопрос. Не рассуждение.",
+            },
+            # ПОРЯДОК ЗНАЧЕНИЙ В СПИСКЕ — ТОЖЕ ПОРЯДОК РАССУЖДЕНИЯ.
+            #
+            # Здесь стояло `["ХВАТИТ", *names]`, и это тот же дефект, что
+            # ярлык впереди содержания, только спрятанный на уровень глубже:
+            # провайдер строит из перечисления грамматику, и первое значение
+            # — самый дешёвый путь. Слабая модель сползает в него.
+            #
+            # Так и вышло. Замер: четыре живых вопроса, по которым агент не
+            # позвал инструмент, все четыре с решением ХВАТИТ, и в трёх из
+            # них собственное поле `why` говорит обратное — «вопрос о топ-5
+            # труб по выработке ресурса, то есть конкретных», «это про
+            # конкретные трубы и их состояние». Модель классифицировала
+            # верно и выбрала первое значение списка.
+            #
+            # Поэтому инструменты идут ПЕРЕД отказом. Расплата за «позвал
+            # лишнего» — один лишний запрос к сервису; расплата за «не
+            # позвал» — ответ про устройство системы вместо запрошенных
+            # чисел. Цены разные, и наклон списка должен смотреть в сторону
+            # дешёвой ошибки.
+            "action": {
+                "type": "string",
+                "enum": [*names, "ХВАТИТ"],
+                "description": (
+                    "Имя инструмента, если вопрос о конкретных объектах и их "
+                    "числах. ХВАТИТ — только если найденного действительно "
+                    "достаточно. Заполнять обязательно."
+                ),
+            },
             "query": {"type": "string"},
             "doc_id": {"type": "string"},
             "heading": {"type": "string"},
@@ -480,7 +544,7 @@ class Agent:
             self._native_misses[key] = self._native_misses.get(key, 0) + 1
 
         call, said = await self._ask_schema(question, found, history, provider, model, tools, open_tables)
-        return call, "схема", said
+        return call, f"схема{_blank_reason(said, tools) if call is None else ''}", said
 
     async def _ask_native(self, question, found, history, provider, model, tools, open_tables):
         """Решение через вызов функции — родной механизм провайдера."""
@@ -489,6 +553,7 @@ class Agent:
             user=_state(question, found, open_tables),
             temperature=self._s.temperature,
             max_tokens=self._s.agent_max_tokens,
+            seed=self._s.seed,
             model=model,
             # Инструменты показываем по правам ЭТОГО человека. Показать
             # недоступный означало бы: модель попробует, получит отказ,
@@ -507,6 +572,7 @@ class Agent:
             user=_state(question, found, open_tables),
             temperature=self._s.temperature,
             max_tokens=self._s.agent_max_tokens,
+            seed=self._s.seed,
             model=model,
             json_schema=decision_schema(tools),
             history=history,
@@ -534,7 +600,12 @@ class Agent:
                     text.append(chunk.text)
         except (ProviderError, ProviderUnavailable):
             return None, ""
-        return None, "".join(text).strip()[:400]
+        # Родной механизм возвращает текст — это строка в журнал, и обрезать
+        # её незачем жалеть. В схеме текст — это САМ БЛАНК РЕШЕНИЯ: обрезка
+        # здесь ломает JSON и превращает вызов инструмента в «модель
+        # отказалась». Рубить то, что потом разбираешь, нельзя.
+        limit = 400 if native else 2000
+        return None, "".join(text).strip()[:limit]
 
 
 def _is_decision(said: str) -> bool:
@@ -547,6 +618,45 @@ def _is_decision(said: str) -> bool:
     """
     head = said.strip().upper()[:40]
     return head.startswith("ХВАТИТ") or head.startswith("ENOUGH")
+
+
+def _blank_reason(said: str, tools: list[dict]) -> str:
+    """ПОЧЕМУ из бланка не вышло вызова. Приписка к названию способа.
+
+    Без неё в отчёте стояло одно слово «схема» на четыре совершенно разные
+    причины, и каждая чинится в другом месте:
+
+      (обрыв)         бланк не дописан — мало токенов;
+      (хватит)        модель приняла решение не звать — это промпт;
+      (без действия)  бланк дописан, а поле action пустое или с выдумкой —
+                      это схема и строгий режим у провайдера;
+      (не бланк)      пришёл свободный текст вместо JSON — провайдер схему
+                      не применил.
+
+    Я уже один прогон потратил на догадки о том, какая из них была: отчёт
+    показывал «ничего не звал», я прочитал это как обрыв, поднял лимит
+    токенов — и обрыв не подтвердился. Догадки стоят прогона, приписка —
+    десяти строк.
+    """
+    import json
+
+    head = said.lstrip()
+    if not head.startswith("{"):
+        return " (не бланк)"
+    try:
+        data = json.loads(head)
+    except (json.JSONDecodeError, TypeError):
+        return " (обрыв)"
+    if not isinstance(data, dict):
+        return " (не бланк)"
+
+    action = str(data.get("action") or "").strip()
+    if _is_decision(action):
+        return " (хватит)"
+    names = {spec["function"]["name"] for spec in tools}
+    if action and action not in names:
+        return f" (выдумал действие: {action!r})"
+    return " (без действия)"
 
 
 def _call_from_json(said: str, tools: list[dict]) -> ToolCall | None:

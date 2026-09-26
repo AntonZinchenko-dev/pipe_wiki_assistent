@@ -403,3 +403,59 @@ def test_embedding_models_do_not_show_up_as_answerers() -> None:
 
     assert not any(ga._is_embedding_model(name) for name in answering)
     assert all(ga._is_embedding_model(name) for name in embedding)
+
+
+def test_the_stream_retries_before_the_first_chunk() -> None:
+    """У облачного провайдера потоковых повторов не было вовсе.
+
+    Предохранитель стоял, повторов не стояло: 503 или 429 ДО первого токена
+    ронял запрос целиком, хотя повторить было можно и безопасно. У
+    локального провайдера ровно в этом месте повтор давно работал — два
+    адаптера одной системы вели себя по-разному на одной беде.
+    """
+    source = inspect.getsource(ga.GigaChatProvider.chat_stream)
+
+    assert "for attempt in range(1, self._retry.attempts + 1)" in source
+    assert "self._retry.delay_for(attempt, failure.retry_after_s)" in source
+
+
+def test_the_boundary_is_chunks_not_text() -> None:
+    """Граница безопасности — «не отдано ни одного куска», а не «не было текста».
+
+    Куски бывают без текста (служебные), и если такой уже ушёл наверх,
+    повтор продублирует его в разборе. Условие строже, чем кажется нужным,
+    и это не перестраховка.
+
+    Аналогия: переспросить собеседника можно, пока он не начал отвечать.
+    Сказал первое слово — поздно.
+    """
+    source = inspect.getsource(ga.GigaChatProvider.chat_stream)
+
+    assert "yielded == 0" in source
+    assert "emitted_text" not in source, "старое, более слабое условие ушло"
+
+
+def test_the_token_is_refreshed_between_attempts() -> None:
+    """Пауза по Retry-After бывает в минуту, а токен живёт тридцать.
+
+    Повтор со старым токеном вернул бы 401 — неповторяемую ошибку, и
+    выглядело бы это как «сервис отказал», а не как «мы пришли с
+    просроченным пропуском».
+    """
+    source = inspect.getsource(ga.GigaChatProvider.chat_stream)
+
+    sleep_at = source.index("asyncio.sleep")
+    refresh_at = source.index("token = await self._ensure_token()", sleep_at)
+
+    assert refresh_at > sleep_at, "токен обновляется ПОСЛЕ паузы, а не до неё"
+
+
+def test_our_own_bad_request_does_not_open_the_breaker() -> None:
+    """400 и 401 — наша ошибка, а не недоступность провайдера.
+
+    Открывать на них предохранитель значит объявить сервис недоступным за
+    собственный неверный запрос.
+    """
+    source = inspect.getsource(ga.GigaChatProvider.chat_stream)
+
+    assert "if failure.retryable:\n                self._breaker.record_failure()" in source

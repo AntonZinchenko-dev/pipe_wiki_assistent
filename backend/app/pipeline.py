@@ -22,7 +22,7 @@ from typing import AsyncIterator
 from .access import ANONYMOUS, RIGHT_AGENT, RIGHT_LIVE_READ, User, denied_projects
 from .agent import Agent, AgentOutcome, AgentProgress
 from .alerts import AlertMonitor
-from .config import Settings
+from .config import Settings, budget_problems
 from .providers import ChatRequest, ProviderError, ProviderRegistry, ProviderUnavailable
 from .providers.base import FinishReason
 from .rag import answer as answer_mod
@@ -71,6 +71,22 @@ class Pipeline:
         # два запроса одного пользователя могут уехать по разным промптам —
         # и в журнале это будет выглядеть как невоспроизводимость модели.
         self._prompt = prompt or active_prompt(settings)
+        # ПРОВЕРКА БЮДЖЕТА — ЗДЕСЬ, А НЕ НА СТАРТЕ СЕРВЕРА.
+        #
+        # Конвейер — единственное место, через которое проходят оба пути:
+        # и сервер, и прогоны. Поставить проверку в запуск приложения значило
+        # бы, что прогон её не делает, — а перебор бюджета портит именно
+        # измерение, молча обрезая контекст.
+        #
+        # Отказ, а не предупреждение. Это детерминированная ошибка настройки,
+        # видная до первого запроса: сервис, который поднялся с заведомо
+        # обрезанным контекстом, выдаёт не ошибку, а тихо ухудшённые ответы —
+        # худший из возможных исходов, потому что его никто не заметит.
+        problems = budget_problems(
+            settings, system_tokens=estimate_tokens(self._prompt.system)
+        )
+        if problems:
+            raise RuntimeError("; ".join(problems))
         self._store = store
         self._providers = providers
         self._traces = traces
@@ -450,6 +466,7 @@ class Pipeline:
             ),
             temperature=self._s.temperature,
             max_tokens=self._s.max_answer_tokens,
+            seed=self._s.seed,
             json_schema=self._prompt.schema,
             model=model,
             # РАЗМЫШЛЕНИЯ ВЫКЛЮЧЕНЫ, и это не экономия, а условие работы.
@@ -716,7 +733,10 @@ class Pipeline:
                 # в предел после пустого шага — терять было нечего.
                 "trail_cut": agent.trail_cut,
                 "mechanism": agent.mechanism,
-                "declined_with": agent.declined_with[:200],
+                # 600, а не 200: когда механизм — «схема (обрыв)», разбирать
+                # придётся именно хвост бланка, а на 200 символах он до
+                # отчёта не доезжает.
+                "declined_with": agent.declined_with[:600],
                 "steps": [
                     {
                         "number": step.number,

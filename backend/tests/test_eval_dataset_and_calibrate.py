@@ -442,3 +442,84 @@ def test_the_run_refuses_to_measure_an_agent_that_is_off() -> None:
     assert "ВОПРОСОВ ПРО ЖИВЫЕ ДАННЫЕ, А АГЕНТ НЕ ВКЛЮЧЁН" in source
     # И обратная проверка на месте: агент попросили, а сервер его не даёт.
     assert "АГЕНТ ЗАПРОШЕН, НО ВЫКЛЮЧЕН НА СЕРВЕРЕ" in source
+
+
+def test_the_run_needs_rights_not_just_a_flag() -> None:
+    """Флага `--agent` мало: конвейер спрашивает ещё и права.
+
+    Прогон шёл анонимом, у которого нет ни права на агента, ни на чтение
+    живых данных. Агентский шаг пропускался молча, `tools_ok` выходил
+    нулём — и выглядело это как поломка агента, а агента просто не пускали.
+    Мы на это попались дважды за один вечер: сначала забыв флаг, потом
+    забыв роль.
+
+    Права — часть измеряемой системы: в проде человек аутентифицирован.
+    """
+    import pathlib
+
+    from app.access import ANONYMOUS, RIGHT_AGENT, RIGHT_LIVE_READ, ROLE_DATA_READER
+    from app.access import User, parse_roles
+
+    assert not ANONYMOUS.may(RIGHT_AGENT), "иначе тест ничего не стережёт"
+
+    run_as = User(name="прогон", roles=parse_roles(ROLE_DATA_READER))
+    assert run_as.may(RIGHT_AGENT)
+    assert run_as.may(RIGHT_LIVE_READ)
+
+    source = pathlib.Path("scripts/eval.py").read_text(encoding="utf-8")
+    assert "НЕ ДАЁТ ПРАВА НА АГЕНТА" in source, "отказ обязан быть громким"
+    assert "--as-role" in source
+
+
+def test_the_role_is_part_of_the_run_fingerprint() -> None:
+    """Иначе прогон под ролью и прогон анонимом лягут под одной шапкой.
+
+    И `compare` объявит разницу между ними улучшением системы — ровно так
+    же, как он сделал бы с отпечатком кода или моделью судьи.
+    """
+    from eval.runner import RunConfig
+
+    assert "run_as" in RunConfig.__dataclass_fields__
+
+
+def test_a_zero_metric_must_come_with_a_diagnosis() -> None:
+    """`tools_ok 0.000` не отличает три разные болезни.
+
+    «Агент решил, что инструменты не нужны», «позвал не тот» и «не умеет
+    вызывать вовсе» — три причины и три ремонта. Разбирать их по файлу
+    прогона руками мы уже пробовали: дорого и каждый раз заново.
+
+    Это то же правило, по которому рядом с «цитат не прошло» печатается
+    сама опора и причина.
+    """
+    from eval.report import summarize
+
+    run = {
+        "config": {
+            "label": "t", "mode": "answer", "chat_model": "m", "embed_model": "e",
+            "prompt_version": "p", "similarity_floor": 0.45, "search_top_k": 24,
+            "context_max_fragments": 8, "context_token_budget": 3200,
+            "temperature": 0.0, "rrf_k": 10, "index_meta": {}, "index_chunks": 1,
+        },
+        "aggregate": {"overall": {"tools_ok": 0.0}, "by_type": {}, "by_split": {}},
+        "rows": [
+            {
+                "question_id": "a001", "answerable": True, "critical": False,
+                "type": "live", "question": "дай топ 5 труб", "status": "not_found",
+                "status_ok": False, "retrieval": {"context_hit": True, "best_cosine": 0.5},
+                "tools_ok": False, "tools_expected": ["live_fleet"],
+                "tools_used": [], "agent_mechanism": "схема",
+                "agent_declined": "ХВАТИТ",
+            }
+        ],
+    }
+
+    text = summarize(run)
+
+    assert "АГЕНТ ПОЗВАЛ НЕ ТО" in text
+    assert "ждали live_fleet" in text
+    assert "ничего не звал" in text
+    assert "способ: схема" in text
+    # И то, что модель ответила вместо вызова: без этого «ничего не звал»
+    # тоже остаётся без диагноза.
+    assert "ХВАТИТ" in text

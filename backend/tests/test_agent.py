@@ -389,7 +389,11 @@ def test_the_report_tells_refusal_apart_from_inability() -> None:
     outcome = asyncio.run(agent.gather("вопрос", empty_result([hit(1)]), trace=FakeTrace()))
 
     assert outcome.used_tools is False
-    assert outcome.mechanism == "схема"
+    # Не просто «схема», а «схема (хватит)»: модель приняла решение, и это
+    # ДРУГОЙ диагноз, чем оборванный бланк или пустое поле действия. В
+    # отчёте все три выглядели как «ничего не звал», и один прогон я на этом
+    # уже потратил, гадая, какой из них.
+    assert outcome.mechanism == "схема (хватит)"
     # И видно, что именно ответила модель, а не просто «ничего не сделал».
     assert outcome.declined_with
 
@@ -427,6 +431,159 @@ def test_an_invented_action_is_refused() -> None:
 
     assert toolbox.ran == []
     assert outcome.used_tools is False
+
+
+class LiveToolbox:
+    """Ящик, в котором настроен сервис живых данных.
+
+    `tool_specs()` сам по себе живых инструментов не отдаёт: они появляются,
+    только когда сервис настроен И человеку можно читать боевые данные.
+    Для проверок про `live_*` это условие надо воспроизвести, иначе имя
+    действия не пройдёт сверку по списку доступных — и тест покажет
+    «модель не позвала» там, где её просто не пускали.
+    """
+
+    def __init__(self, inner: FakeToolbox) -> None:
+        self._inner = inner
+
+    @property
+    def ran(self) -> list[tuple[str, dict]]:
+        return self._inner.ran
+
+    def specs(self, *, live_allowed: bool = True) -> list[dict]:
+        from app.rag.tools import LIVE_SPECS
+
+        return tool_specs() + (list(LIVE_SPECS) if live_allowed else [])
+
+    async def run(self, name: str, arguments: dict, *, live_allowed: bool = True) -> ToolOutcome:
+        return await self._inner.run(name, arguments, live_allowed=live_allowed)
+
+
+def test_a_cut_blank_is_not_a_refusal() -> None:
+    """Пять живых вопросов прогона стояли в отчёте как «ничего не звал».
+
+    В `why` модель определяла вопрос ПРАВИЛЬНО — «это про конкретные трубы
+    и их состояние» — и вызова всё равно не было. Причина оказалась не в
+    промпте и не в списке инструментов: бланк обрывался посреди `why`,
+    поля `action` в нём не появлялось, JSON не разбирался. Снаружи это
+    выглядело как решение модели, и чинить шли не туда.
+
+    Отсюда и проверка: оборванный бланк обязан называться обрывом.
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    toolbox = FakeToolbox({})
+    # Ровно то, что приходило из прогона: начало бланка без конца.
+    providers = TextOnlyProviders(
+        '{\n    "why": "Вопрос о том, какие трубы под списание — это про конкретные трубы'
+    )
+    agent = Agent(settings=settings, toolbox=toolbox, providers=providers)
+
+    outcome = asyncio.run(agent.gather("какие трубы под списание", empty_result([hit(1)]), trace=FakeTrace()))
+
+    assert toolbox.ran == []
+    assert outcome.mechanism == "схема (обрыв)", "обрыв нельзя показывать как отказ"
+    assert outcome.declined_with
+
+
+def test_a_parsed_blank_without_an_action_says_so() -> None:
+    """Четвёртый случай, и найден он ценой прогона.
+
+    Я решил, что пять живых вопросов остались без вызова из-за обрыва
+    бланка, поднял лимит токенов — и обрыв не подтвердился: бланки
+    разобрались, а вызова всё равно не было. Значит модель дописывает
+    бланк и оставляет поле действия пустым, а отчёт называл это тем же
+    словом «схема», что и осознанное «хватит».
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    toolbox = FakeToolbox({})
+    providers = TextOnlyProviders('{"why": "это про конкретные трубы", "action": ""}')
+    agent = Agent(settings=settings, toolbox=toolbox, providers=providers)
+
+    outcome = asyncio.run(agent.gather("вопрос", empty_result([hit(1)]), trace=FakeTrace()))
+
+    assert toolbox.ran == []
+    assert outcome.mechanism == "схема (без действия)"
+
+
+def test_an_invented_action_is_named_in_the_report() -> None:
+    """Выдуманное имя инструмента — отдельный диагноз, и его надо видеть.
+
+    «Без действия» чинится схемой и строгим режимом, выдуманное имя —
+    списком инструментов и промптом. Одно слово на оба случая снова
+    отправило бы чинить не туда.
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    providers = TextOnlyProviders('{"why": "хочу", "action": "delete_everything"}')
+    agent = Agent(settings=settings, toolbox=FakeToolbox({}), providers=providers)
+
+    outcome = asyncio.run(agent.gather("вопрос", empty_result([hit(1)]), trace=FakeTrace()))
+
+    assert "выдумал действие" in outcome.mechanism
+    assert "delete_everything" in outcome.mechanism
+
+
+def test_the_blank_is_not_truncated_before_it_is_parsed() -> None:
+    """Обрезка ответа рубила то, что мы потом разбираем.
+
+    В журнале обрезать длинный текст правильно. Но в схеме текст — это сам
+    бланк решения: 400 символов хватало на многословное `why` и не хватало
+    на `action` за ним. Вызов инструмента терялся внутри нашего же кода.
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    toolbox = FakeToolbox({"live_fleet": ToolOutcome(text="таблица", hits=[hit(9)])})
+    verbose = "вопрос про конкретные трубы и их числа, " * 12  # ~470 символов
+    providers = TextOnlyProviders(
+        '{"why": "' + verbose + '", "action": "live_fleet", "top_n": 5}'
+    )
+    agent = Agent(settings=settings, toolbox=LiveToolbox(toolbox), providers=providers)
+
+    outcome = asyncio.run(
+        agent.gather(
+            "дай топ 5 труб", empty_result([hit(1)]), trace=FakeTrace(), live_allowed=True
+        )
+    )
+
+    assert toolbox.ran == [("live_fleet", {"top_n": 5})]
+    assert outcome.mechanism == "схема"
+
+
+def test_the_blank_asks_for_a_short_reason() -> None:
+    """Границу длины держит схема, а не надежда.
+
+    `why` идёт первым — так измерено, менять порядок нельзя. Значит длину
+    обоснования надо ограничивать там же, где оно объявлено, иначе модель
+    тратит на него весь бюджет ответа.
+    """
+    from app.agent import decision_schema
+
+    schema = decision_schema(LiveToolbox(FakeToolbox({})).specs())
+
+    assert schema["properties"]["why"]["maxLength"] <= 200
+    assert schema["properties"]["why"].get("description")
+    assert schema["properties"]["action"].get("description")
+    # Порядок полей — часть измеренного решения, проверяем и его.
+    assert list(schema["properties"])[:2] == ["why", "action"]
+
+
+def test_enough_is_the_last_choice_not_the_first() -> None:
+    """Порядок значений в перечислении — тот же дефект, что ярлык впереди.
+
+    Провайдер строит из перечисления грамматику, и первое значение — самый
+    дешёвый путь. Со `ХВАТИТ` впереди замер дал четыре живых вопроса без
+    вызова, и в трёх из них собственное поле `why` говорило обратное: «это
+    про конкретные трубы и их состояние» — и тут же решение не ходить за
+    ними.
+
+    Наклон списка должен смотреть в сторону дешёвой ошибки. Лишний запрос к
+    сервису стоит запроса; неслучившийся вызов стоит ответа не на тот
+    вопрос.
+    """
+    from app.agent import decision_schema
+
+    choices = decision_schema(LiveToolbox(FakeToolbox({})).specs())["properties"]["action"]["enum"]
+
+    assert choices[-1] == "ХВАТИТ", "отказ обязан быть последним в списке"
+    assert "live_fleet" in choices[:-1]
 
 
 # --------------------------- разбор двух логов: что чинилось и чем проверено

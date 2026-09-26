@@ -238,6 +238,7 @@ class Judge:
         max_excerpt_chars: int = 2400,
         think: bool | None = False,
         max_tokens: int = 700,
+        seed: int | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -245,6 +246,14 @@ class Judge:
         self._max_excerpt_chars = max_excerpt_chars
         self._think = think
         self._max_tokens = max_tokens
+        # ЗЕРНО У СУДЬИ ВАЖНЕЕ, ЧЕМ У ОТВЕЧАЮЩЕЙ МОДЕЛИ.
+        #
+        # Судья — измерительный прибор. Плавающий ответ отвечающей модели
+        # портит один ответ; плавающий вердикт судьи портит ВСЕ выводы,
+        # которые по нему делаются, и разброс прибора складывается с
+        # разбросом измеряемого. Если зерно доступно — прибор надо
+        # закреплять первым.
+        self._seed = seed
         self._excerpt_cache: dict[str, str] = {}
         self._label_cache: dict[str, list[str]] = {}
 
@@ -484,6 +493,7 @@ class Judge:
             user=user,
             temperature=0.0,
             max_tokens=self._max_tokens,
+            seed=self._seed,
             json_schema=JUDGE_SCHEMA,
             think=think,
         )

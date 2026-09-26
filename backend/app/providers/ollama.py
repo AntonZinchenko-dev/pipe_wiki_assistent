@@ -112,6 +112,8 @@ class OllamaProvider:
             payload["tools"] = request.tools
         if request.stop:
             payload["options"]["stop"] = request.stop
+        if request.seed is not None:
+            payload["options"]["seed"] = request.seed
         if request.keep_alive is not None:
             payload["keep_alive"] = request.keep_alive
         if request.think is not None:

@@ -472,3 +472,50 @@ def test_the_inspection_page_does_not_claim_a_scan_it_did_not_do() -> None:
 
     source = _inspect.getsource(live.LiveApi.inspections)
     assert "scanned=0" in source
+
+
+def test_the_fleet_tool_comes_first() -> None:
+    """Маленькая модель тяготеет к первому инструменту списка.
+
+    Замером показано: за весь прогон агент не позвал live_fleet ни разу, а
+    live_pipe звал на всё подряд — и на парк, и на скважины, и на
+    «следующие 5». live_pipe стоял первым.
+
+    Самый частый вопрос — про парк, значит первым стоит парк. Это не
+    подкрутка под модель: порядок в списке и есть подсказка о том, что
+    вероятнее.
+    """
+    assert LIVE_SPECS[0]["function"]["name"] == "live_fleet"
+
+
+def test_a_passport_call_without_a_pipe_id_is_refused() -> None:
+    """Паспорт одной трубы без идентификатора трубы не имеет смысла.
+
+    Описание инструмента про это написано и не сработало. Вместо похода в
+    сервис с выдуманным PP-0000 возвращаем отказ, который НАЗЫВАЕТ нужный
+    инструмент: модель прочитает его на том же шаге и исправится, не
+    потратив вызов впустую.
+    """
+    import asyncio
+
+    from app.config import Settings
+    from app.rag.tools import Toolbox
+
+    live, _ = make()
+    box = Toolbox(store=None, settings=Settings(), embedder=None, live=live)
+
+    outcome = asyncio.run(box.run("live_pipe", {"pipe_id": "парк"}))
+
+    assert not outcome.ok
+    assert "live_fleet" in outcome.text
+    assert "live_inspections" in outcome.text
+
+
+def test_a_real_pipe_id_still_goes_through() -> None:
+    """Проверка не должна перекрыть тот случай, ради которого инструмент есть."""
+    from app.rag.tools import _PIPE_ID
+
+    assert _PIPE_ID.fullmatch("PP-0035")
+    assert _PIPE_ID.fullmatch("W-122")
+    assert not _PIPE_ID.fullmatch("")
+    assert not _PIPE_ID.fullmatch("все трубы")

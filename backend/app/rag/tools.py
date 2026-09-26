@@ -42,6 +42,8 @@
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 
 from ..config import Settings
@@ -71,28 +73,6 @@ MAX_SECTION_CHUNKS = 6
 # позвала, а проверка прав не узнала бы имени и вернула «такого нет».
 # Ошибка выглядела бы как галлюцинация модели.
 LIVE_SPECS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "live_pipe",
-            "description": (
-                "Текущие данные по ОДНОЙ трубе из FATIGUE-API: выработка ресурса, "
-                "циклы, критическое сечение. Вызывай, когда в вопросе назван "
-                "конкретный идентификатор трубы (например PP-0035) и нужно её "
-                "нынешнее состояние. Документы этих чисел не содержат."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pipe_id": {
-                        "type": "string",
-                        "description": "Идентификатор трубы, например PP-0035",
-                    }
-                },
-                "required": ["pipe_id"],
-            },
-        },
-    },
     {
         "type": "function",
         "function": {
@@ -134,6 +114,30 @@ LIVE_SPECS = [
                 # порог значило бы заставлять модель выдумывать число там,
                 # где спрашивали про количество.
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "live_pipe",
+            "description": (
+                "Текущие данные по ОДНОЙ трубе из FATIGUE-API: выработка ресурса, "
+                "циклы, критическое сечение. Вызывай ТОЛЬКО когда в вопросе "
+                "назван идентификатор трубы вида PP-0035. Нет идентификатора — "
+                "этот инструмент не подходит: про парк спрашивай live_fleet, про "
+                "осмотры live_inspections, про скважины live_wells. "
+                "Документы этих чисел не содержат."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pipe_id": {
+                        "type": "string",
+                        "description": "Идентификатор трубы, например PP-0035",
+                    }
+                },
+                "required": ["pipe_id"],
             },
         },
     },
@@ -306,6 +310,9 @@ class ToolOutcome:
     dataset: "Dataset | None" = None
 
 
+# Идентификатор трубы: PP-0035. Ровно тот формат, что отдаёт сервис.
+_PIPE_ID = re.compile(r"[A-Za-zА-Яа-я]{1,5}-\d{1,6}")
+
 LIVE_TOOL_NAMES = frozenset(spec["function"]["name"] for spec in LIVE_SPECS)
 
 
@@ -390,7 +397,31 @@ class Toolbox:
             )
 
         if name == "live_pipe":
-            result = await self._live.pipe(str(arguments.get("pipe_id") or ""))
+            # ПРОВЕРКА В КОДЕ, А НЕ ПРОСЬБА В ОПИСАНИИ.
+            #
+            # Замером показано: на «какие трубы за порогом аварии», «на какой
+            # скважине хуже всего» и «следующие 5» модель звала live_pipe —
+            # то есть паспорт ОДНОЙ трубы там, где спрашивали про парк. Ни
+            # одного вызова live_fleet за весь прогон.
+            #
+            # Описание инструмента про это уже написано, и не сработало.
+            # Здесь случай, когда правило проверяется арифметикой: паспорт
+            # без идентификатора трубы не имеет смысла, и вместо похода в
+            # сервис с выдуманным PP-0000 честнее вернуть отказ, который
+            # называет нужный инструмент. Модель прочитает его на том же
+            # шаге и исправится, не потратив вызов впустую.
+            pipe_id = str(arguments.get("pipe_id") or "").strip()
+            if not _PIPE_ID.fullmatch(pipe_id):
+                return ToolOutcome(
+                    text=(
+                        f"live_pipe — это паспорт ОДНОЙ трубы, а идентификатора "
+                        f"вида PP-0035 в вызове нет ({pipe_id!r}). "
+                        f"Про парк целиком — live_fleet, про осмотры и списание — "
+                        f"live_inspections, про скважины — live_wells."
+                    ),
+                    ok=False,
+                )
+            result = await self._live.pipe(pipe_id)
         elif name == "live_inspections":
             result = await self._live.inspections(
                 arguments.get("category"),

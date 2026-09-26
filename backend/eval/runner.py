@@ -24,6 +24,7 @@ from typing import Literal
 from app.config import Settings
 from app.pipeline import Pipeline
 from app.rag.embed import embed_query
+from app.access import ANONYMOUS, User
 from app.rag.history import Turn, needs_history, support_query
 from app.rag.search import Query, hybrid_search_many
 from app.rag.store import Store
@@ -92,8 +93,39 @@ class RunConfig:
     # одинаковой шапкой, и `compare` объявил бы разницу между ними
     # разбросом. Ровно на этом мы уже попадались — с отпечатком кода, с
     # моделью судьи и с весом ключевого списка.
+    # Зерно случайности. `null` — не задавалось, и прогон воспроизводим
+    # только по смыслу. Обязано быть в отпечатке: прогон с закреплённым
+    # зерном и прогон без него — разные по разбросу системы, и сравнивать
+    # их порог шума нельзя.
+    seed: int | None = None
     agent: bool = False
+    # Отпечаток промпта агента, бланка решения и описаний инструментов.
+    #
+    # То же правило, что для промпта ответа: версия и хеш в журнал каждого
+    # прогона. Без него правка агента видна в шапке только как другой
+    # `код` — то есть неотличима от опечатки в комментарии.
+    agent_version: str = ""
     agent_max_steps: int = 0
+    # ЛИМИТ ТОКЕНОВ НА РЕШЕНИЕ И СПОСОБ РЕШЕНИЯ — В ОТПЕЧАТОК ЖЕ.
+    #
+    # Тот же довод, что выше, и он уже подтверждён на нас: на лимите 200
+    # бланк решения обрывался посреди первого поля, и пять живых вопросов
+    # из двенадцати уходили без вызова инструмента. Это не настройка
+    # вежливости, а граница, за которой агент перестаёт работать. Два
+    # прогона с разным лимитом — разные системы.
+    agent_max_tokens: int = 0
+    agent_decision: str = ""
+    # РОЛЬ, ОТ ИМЕНИ КОТОРОЙ ШЁЛ ПРОГОН.
+    #
+    # Права — часть измеряемой системы, а не деталь стенда. Прогон анонимом
+    # не вызывает ни одного инструмента (у анонима нет права на агента), и
+    # `tools_ok` выходит нулём: выглядит как поломка агента, а агента не
+    # пускали. Мы на это попались дважды за один вечер.
+    #
+    # Без этого поля прогон под ролью и прогон анонимом легли бы в журнал
+    # под одинаковой шапкой, и `compare` объявил бы разницу между ними
+    # улучшением системы.
+    run_as: str = ""
     # Ограничения по проектам. Прогон с закрытым проектом измеряет ДРУГУЮ
     # систему: часть корпуса просто не участвует в поиске, и метрики
     # поиска падают не потому, что он стал хуже. Без этого поля два таких
@@ -119,6 +151,12 @@ class RowResult:
     split: str = "tune"
     # Поля режима ответа заполняются только в mode="answer"
     status: str = ""
+    # ПОЧЕМУ статус вышел `error`. Пусто у всех остальных.
+    #
+    # Без этого поля `статус error` в отчёте — тупик: причина («модель не
+    # отдала ни байта», «обрыв по лимиту токенов», «структура не разобрана»)
+    # известна системе, дописана в конверт ответа и никуда не доезжала.
+    schema_error: str = ""
     status_ok: bool | None = None
     answer: str = ""
     citations_total: int = 0
@@ -179,6 +217,15 @@ class RowResult:
     tables_ok: bool | None = None
     tools_used: list[str] = field(default_factory=list)
     tools_ok: bool | None = None
+    # Что ОЖИДАЛОСЬ и ЧЕМ агент это объяснил.
+    #
+    # `tools_ok 0.000` — число без диагноза, ровно как когда-то «цитат не
+    # прошло: 16». По нему нельзя отличить «агент решил, что инструменты не
+    # нужны» от «позвал не тот» и от «не умеет вызывать вовсе». Это три
+    # разные болезни и три разных ремонта.
+    tools_expected: list[str] = field(default_factory=list)
+    agent_mechanism: str = ""
+    agent_declined: str = ""
     # Обозначения, которых сервис не отдавал, и числа, разошедшиеся с ним.
     # Детекторы уже написаны и работают в проде — здесь они становятся
     # метрикой, а не только предупреждением на экране.
@@ -299,6 +346,7 @@ async def run_answer(
     judge=None,
     on_progress=None,
     agent: bool = False,
+    user: User = ANONYMOUS,
 ) -> list[RowResult]:
     """Полный прогон с генерацией: медленно, дорого, недетерминированно.
 
@@ -328,6 +376,17 @@ async def run_answer(
             async for event in pipeline.stream_answer(
                 question.question,
                 agent=agent,
+                # ОТ ЧЬЕГО ИМЕНИ ИДЁТ ПРОГОН — часть измеряемой системы.
+                #
+                # По умолчанию здесь стоял аноним, а у анонима нет ни права
+                # на агента, ни на чтение живых данных. Конвейер молча
+                # пропускал агентский шаг: инструменты не вызывались,
+                # `tools_ok` выходил нулём, и выглядело это как поломка
+                # агента. Агента просто не пускали.
+                #
+                # Права — не деталь стенда, а условие задачи: в проде
+                # человек аутентифицирован и роль у него есть.
+                user=user,
                 history=[
                     Turn(role=turn["role"], content=turn["content"])
                     for turn in question.history
@@ -408,6 +467,10 @@ async def run_answer(
                 else len(datasets) == question.expect_tables
             ),
             tools_used=[step["tool"] for step in ((meta.get("agent") or {}).get("steps") or [])],
+            tools_expected=list(question.expect_tools),
+            agent_mechanism=str((meta.get("agent") or {}).get("mechanism", "")),
+            agent_declined=str((meta.get("agent") or {}).get("declined_with", ""))[:600],
+            schema_error=str(answer.get("schema_error") or "")[:200],
             tools_ok=(
                 None if not question.expect_tools
                 else set(question.expect_tools)
