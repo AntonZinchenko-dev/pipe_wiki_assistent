@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -104,6 +104,52 @@ class ChatRequestBody(AskRequest):
     # Таблицы, показанные в этом же диалоге. Потолок маленький нарочно:
     # смысл имеют последние, а не все за день.
     open_tables: list[OpenTableRef] = Field(default_factory=list, max_length=4)
+
+
+@router.get("/live")
+async def live() -> dict:
+    """Жив ли ПРОЦЕСС. Модель здесь не спрашивается, и это принципиально.
+
+    Живость и готовность — разные вопросы, и путать их дорого. Оркестратор
+    по живости ПЕРЕЗАПУСКАЕТ. Если сюда добавить проверку модели, то падение
+    чужого сервиса — облака, локального рантайма, сети — будет выглядеть как
+    смерть нашего процесса, и нас начнут перезапускать по кругу ровно в тот
+    момент, когда мы исправно работаем и отдаём понятные ошибки. Перезапуск
+    при этом ничего не чинит: модель от него не поднимется.
+
+    Поэтому здесь буквально «интерпретатор отвечает».
+    """
+    return {"ok": True}
+
+
+@router.get("/ready")
+async def ready(request: Request, response: Response) -> dict:
+    """Можно ли слать сюда трафик. Здесь модель спрашивается ОБЯЗАТЕЛЬНО.
+
+    По готовности балансировщик СНИМАЕТ НАГРУЗКУ, не перезапуская. Это
+    правильная реакция на «модель недоступна» и на «индекс пуст»: сервис
+    жив, но отвечать ему нечем, и присылать людей к нему незачем.
+
+    Отдаём 503, а не 200 с полем `ok: false`. Балансировщики читают код
+    ответа, а не тело; двухсотка с честным телом внутри для них означает
+    «всё хорошо, шлите людей».
+    """
+    app = request.app.state
+    providers = await app.providers.health()
+    chunks = app.store.stats().get("chunks", 0)
+    model_ok = any(item.get("ok") for item in providers)
+    ok = bool(model_ok and chunks)
+    if not ok:
+        response.status_code = 503
+    return {
+        "ok": ok,
+        # Причина словами: по коду 503 видно, что не готов, и не видно чем.
+        "why": "" if ok else (
+            "нет доступного провайдера модели" if not model_ok else "индекс пуст"
+        ),
+        "providers": providers,
+        "chunks": chunks,
+    }
 
 
 @router.get("/health")

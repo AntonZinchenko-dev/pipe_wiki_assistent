@@ -19,9 +19,10 @@
 
 from __future__ import annotations
 
+import json
 import textwrap
 
-from .metrics import CORPUS_LANGUAGE, mean, spread
+from .metrics import CORPUS_LANGUAGE, mean, spread, table_answered
 
 SUMMARY_KEYS = (
     "recall@5", "mrr", "ndcg@10", "chunk_mrr", "chunk_top1",
@@ -38,7 +39,19 @@ SUMMARY_KEYS = (
     #                же дефект, как её отсутствие.
     # `tools_ok`   — в тот ли эндпоинт сходил.
     # `live_clean` — не выдумал ли обозначений и не разошлись ли числа.
-    "tables_ok", "tools_ok", "live_clean",
+    #
+    # `refusal_said` — дошёл ли отказ сервиса до человека словами. Добавлена
+    # после прогона, где сервис отказал (E-1042 на трубе PP-0007), таблица
+    # пришла пустой, все агентские метрики показали «в порядке», а человек
+    # про отказ не узнал: ответ рассказал ему про архивный постмортем.
+    #
+    # `answer_uses_table` — назвал ли ответ хоть один объект таблицы, которую
+    # сам же запросил. Добавлена после прогона, где все остальные агентские
+    # метрики показали ровно 1.000, а два живых ответа из девяти таблицу не
+    # использовали вовсе. Идеальные цифры при плохих ответах — то самое, что
+    # эта метрика делает видимым.
+    "tables_ok", "tools_ok", "live_clean", "table_answered", "refusal_said",
+    "answer_uses_table",
     "judge_ok",
 )
 
@@ -70,6 +83,51 @@ def _cell(value, width: int = 8) -> str:
     if value is None:
         return f"{NOT_MEASURED:>{width}}"
     return f"{value:>{width}.3f}"
+
+
+def _blank_lines(said: str, mechanism: str) -> list[str]:
+    """Бланк решения агента — разобранный, а не сырой.
+
+    Печаталось это раньше как первые 90 символов сырого JSON, и на них
+    уходил весь экран: `{\\n    "why": "` плюс начало обоснования. Три
+    прогона подряд я по этой строке пытался понять, оборвано обоснование
+    или дописано, — и дважды ответил неверно, потому что по голове бланка
+    этого не видно. Видно по ДЛИНЕ поля и по его хвосту.
+
+    Длина `why` печатается числом нарочно. Ровно она отличает «модель
+    подумала и решила» от «мы отрубили мысль по границе схемы»: круглое
+    число вроде 200 — это наша граница, а не решение модели.
+    """
+    if not said:
+        return []
+
+    try:
+        blank = json.loads(said)
+    except (json.JSONDecodeError, TypeError):
+        blank = None
+    if not isinstance(blank, dict):
+        # Не бланк вообще: свободный текст или обрывок. Тогда интересен
+        # хвост — на чём кончилось.
+        tail = said.strip()[-120:]
+        return [f"      не бланк ({len(said)} симв.), кончается на: «…{tail}»"]
+
+    why = str(blank.get("why") or "")
+    action = str(blank.get("action") or "")
+    verdict = str(blank.get("verdict") or "")
+    out = [f"      действие: {action or '—'}   обоснование: {len(why)} симв."]
+    if verdict:
+        # Вывод печатается рядом с действием нарочно: несогласие между ними
+        # — самый частый дефект этого бланка, и увидеть его надо одним
+        # взглядом, а не сопоставляя две строки отчёта.
+        out.insert(0, f"      вывод: {verdict}")
+    if why:
+        # Обоснование целиком, кусками по 100 символов: обрыв мысли виден
+        # только в её конце, а конец — это то, что раньше и обрезалось.
+        for start in range(0, min(len(why), 400), 100):
+            out.append(f"      | {why[start:start + 100]}")
+    if "обрыв" in mechanism:
+        out.append("      бланк не дописан — смотри лимит токенов на решение")
+    return out
 
 
 def summarize(run: dict) -> str:
@@ -330,14 +388,72 @@ def summarize(run: dict) -> str:
                 f"  {row['question_id']}  ждали {expected:<18} позвал {actual:<28} "
                 f"способ: {row.get('agent_mechanism') or '—'}"
             )
-            said = row.get("agent_declined") or ""
-            if said and "обрыв" in (row.get("agent_mechanism") or ""):
-                # У оборванного бланка интересен ХВОСТ: там видно, на чём
-                # модель срезало и сколько ей не хватило. Голова бланка при
-                # обрыве всегда одна и та же — начало поля `why`.
-                lines.append(f"      бланк не дописан, оборвано на: «…{said[-90:]}»")
-            elif said:
-                lines.append(f"      вместо вызова ответил: «{said[:90]}»")
+            lines.extend(_blank_lines(row.get("agent_declined") or "",
+                                      row.get("agent_mechanism") or ""))
+        lines.append("")
+
+    # ТАБЛИЦА ПРИШЛА, А ОТВЕТ ЕЁ ОТРИЦАЕТ.
+    #
+    # Самый дорогой разрыв из всех: инструмент позвали верно, данные у
+    # человека на экране, а текст рядом с ними говорит «нет информации».
+    # Ни одна метрика этого не показывала: `tools_ok` был 1.000, а
+    # `answer_contains` даже вырос — живые вопросы освобождены от проверок
+    # по документам, и провал в них был метрикам не виден.
+    # Считаем на лету, если в файле прогона поля ещё нет. Проверка чистая:
+    # ответ и число таблиц в строке уже сохранены. Так старые прогоны
+    # отвечают на новый вопрос без повторного прогона на полтора часа —
+    # ради этого метрику и стоит держать вычислимой из сохранённого.
+    def _denies(row: dict) -> bool:
+        stored = row.get("table_answered")
+        if stored is not None:
+            return stored is False
+        return table_answered(row.get("answer") or "", row.get("tables") or 0) is False
+
+    denied = [row for row in rows if _denies(row)]
+    if denied:
+        lines.append(f"ТАБЛИЦА ПРИШЛА, А ОТВЕТ ЕЁ ОТРИЦАЕТ ({len(denied)})")
+        for row in denied[:12]:
+            lines.append(f"  {row['question_id']}  {row['question'][:56]}")
+            lines.append(f"      ответ: {(row.get('answer') or '')[:104]}")
+        lines.append("")
+
+    # ОБОЗНАЧЕНИЕ, КОТОРОГО НЕТ НИ В ОДНОМ ИСТОЧНИКЕ.
+    #
+    # `live_clean 0.917` — число без диагноза: по нему нельзя отличить
+    # выдуманную трубу от разошедшегося процента, а это разные болезни.
+    # Печатаем поимённо, и показанные вместе с убранными: убранные видит
+    # только замер, и если их не назвать, дефект исчезнет из отчёта ровно
+    # тогда, когда мы научились прятать его от человека.
+    dirty = [
+        row for row in rows
+        if row.get("invented_refs") or row.get("invented_dropped")
+        or row.get("mismatched_refs")
+    ]
+    if dirty:
+        lines.append(f"ОБОЗНАЧЕНИЯ И ЧИСЛА МИМО ИСТОЧНИКОВ ({len(dirty)})")
+        for row in dirty[:12]:
+            what = []
+            if row.get("invented_refs"):
+                what.append(f"придумано: {', '.join(row['invented_refs'])}")
+            if row.get("invented_dropped"):
+                what.append(f"придумано и убрано: {', '.join(row['invented_dropped'])}")
+            if row.get("mismatched_refs"):
+                what.append(f"цифра не та: {', '.join(row['mismatched_refs'])}")
+            lines.append(f"  {row['question_id']}  {row['question'][:52]}")
+            lines.append(f"      {' | '.join(what)}")
+        lines.append("")
+
+    # ТАБЛИЦА ПРИШЛА, А ОТВЕТ ЕЮ НЕ ВОСПОЛЬЗОВАЛСЯ.
+    #
+    # Отдельно от «отрицает таблицу»: там текст про таблицу говорит и говорит
+    # неправду, здесь он про неё молчит и отвечает из документов. Второе тише
+    # и потому опаснее — выглядит как обычный связный ответ.
+    unused = [row for row in rows if row.get("answer_uses_table") is False]
+    if unused:
+        lines.append(f"ТАБЛИЦА ПРИШЛА, А ОТВЕТ ЕЮ НЕ ВОСПОЛЬЗОВАЛСЯ ({len(unused)})")
+        for row in unused[:12]:
+            lines.append(f"  {row['question_id']}  {row['question'][:56]}")
+            lines.append(f"      ответ: {(row.get('answer') or '')[:104]}")
         lines.append("")
 
     worst = [

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -367,14 +368,29 @@ def overridden_from_env(settings: BaseSettings) -> dict[str, tuple[object, objec
     машинами — путям, адресам, ключам. Настроенные константы там быть не
     должны, иначе каждая правка требуется в двух местах, и однажды будет
     сделана в одном.
+
+    Секреты возвращаются маской: результат печатается в консоль и в логи
+    прогонов, а ключу там не место. Факт переопределения виден и так.
     """
     changed: dict[str, tuple[object, object]] = {}
     for name, field in type(settings).model_fields.items():
         current = getattr(settings, name)
         default = field.default
         if default is not None and current != default:
+            if _SECRET_FIELD.search(name):
+                current = mask_secret(current)
             changed[name] = (current, default)
     return changed
+
+
+# `_tokens` (лимиты) сюда не попадают: шаблон требует `_token` в самом конце.
+_SECRET_FIELD = re.compile(r"(_key|_token|secret|password)$")
+
+
+def mask_secret(value: object) -> str:
+    """Задан ли секрет и какой длины — без самого значения."""
+    text = str(value)
+    return f"<скрыто, {len(text)} симв.>" if text else ""
 
 
 def budget_problems(settings: Settings, *, system_tokens: int = 0) -> list[str]:

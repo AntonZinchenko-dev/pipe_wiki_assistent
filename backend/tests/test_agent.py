@@ -341,15 +341,26 @@ class TextOnlyProviders:
 
     chain = ["gigachat"]
 
-    def __init__(self, schema_reply: str) -> None:
+    def __init__(self, schema_reply: str, *, need: bool = True) -> None:
         self._schema_reply = schema_reply
+        # РЕШЕНИЕ ПРИНИМАЕТСЯ ДВУМЯ ВОПРОСАМИ, и поддельный провайдер обязан
+        # отвечать на них по-разному — иначе тест проверяет протокол, которого
+        # в системе нет. Первый вопрос узнаётся по полю `need` в схеме.
+        self._need = need
         self.requests: list[object] = []
 
     async def stream_chat(self, request, *, prefer="", on_provider=None):
         self.requests.append(request)
-        # Вызовов не отдаём никогда. На запрос со схемой отвечаем бланком,
-        # на запрос с инструментами — обычным текстом, как и настоящая.
-        text = self._schema_reply if request.json_schema else "Самая изношенная труба — это та…"
+        schema = request.json_schema or {}
+        fields = (schema.get("properties") or {}) if isinstance(schema, dict) else {}
+        if "need" in fields:
+            answer = "НУЖНЫ ДАННЫЕ ИЗ СЕРВИСА" if self._need else "НАЙДЕННОГО ХВАТАЕТ"
+            text = '{"why": "проверка", "need": "' + answer + '"}'
+        elif request.json_schema:
+            text = self._schema_reply
+        else:
+            # Вызовов не отдаём никогда: так вела себя облачная Lightning.
+            text = "Самая изношенная труба — это та…"
         yield ChatChunk(text=text)
         yield ChatChunk(done=True, finish_reason=FinishReason.STOP, usage=Usage())
 
@@ -547,22 +558,137 @@ def test_the_blank_is_not_truncated_before_it_is_parsed() -> None:
     assert outcome.mechanism == "схема"
 
 
-def test_the_blank_asks_for_a_short_reason() -> None:
-    """Границу длины держит схема, а не надежда.
+def test_the_reasoning_field_has_no_hard_length_limit() -> None:
+    """Границу длины на поле для рассуждения ставить нельзя.
 
-    `why` идёт первым — так измерено, менять порядок нельзя. Значит длину
-    обоснования надо ограничивать там же, где оно объявлено, иначе модель
-    тратит на него весь бюджет ответа.
+    Я поставил `maxLength: 200`, чтобы обоснование не съедало бюджет до
+    `action`. Провайдер соблюдает границу буквально: поле закрывается на
+    двухсотом символе, где бы модель ни была. На замере оба обрыва пришлись
+    за полслова до верного вывода — «...но нет списка с», «...но нет данных
+    о реальных трубах или их инсп» — и решение принималось по фразе,
+    кончающейся союзом «но».
+
+    От «обоснование съело бюджет» лечит бюджет и просьба в описании. Обрыв
+    по токенам к тому же теперь виден: `_blank_reason` называет его
+    «(обрыв)», и молчаливой потери, ради которой ставилась граница, больше
+    не бывает.
     """
     from app.agent import decision_schema
 
     schema = decision_schema(LiveToolbox(FakeToolbox({})).specs())
+    why = schema["properties"]["why"]
 
-    assert schema["properties"]["why"]["maxLength"] <= 200
-    assert schema["properties"]["why"].get("description")
+    assert "maxLength" not in why, "рассуждение нельзя обрывать по символам"
+    assert why.get("description"), "просить краткости надо описанием, а не ножом"
     assert schema["properties"]["action"].get("description")
-    # Порядок полей — часть измеренного решения, проверяем и его.
-    assert list(schema["properties"])[:2] == ["why", "action"]
+    # Порядок полей проверяется отдельным тестом: рассуждение, вывод,
+    # действие. Здесь важно только, что рассуждение идёт первым.
+    assert list(schema["properties"])[0] == "why"
+
+
+def test_the_agent_digest_notices_a_change_inside_a_field() -> None:
+    """Сторож обязан замечать правку, ради которой он поставлен.
+
+    Первая версия отпечатка считалась от `sorted(properties)` — от одних
+    названий полей. Я снял с `why` границу длины, которая стоила двух живых
+    вопросов, пересчитал отпечаток и получил прежний: названия не менялись.
+    Проверка, не замечающая содержательную правку, — успокоительное, а не
+    проверка, и выглядит она точно так же, как работающая.
+
+    Тест подменяет одну букву ВНУТРИ описания поля: если отпечаток это
+    переживёт, он снова сторожит пустоту.
+    """
+    from app import agent as agent_module
+
+    before = agent_module.agent_version()
+    original = agent_module.AGENT_PROMPT
+    try:
+        agent_module.AGENT_PROMPT = original + " "
+        assert agent_module.agent_version() != before, "правка промпта не сдвинула отпечаток"
+    finally:
+        agent_module.AGENT_PROMPT = original
+
+    assert agent_module.agent_version() == before, "отпечаток обязан быть воспроизводимым"
+
+
+def test_the_blank_covers_every_tool_parameter() -> None:
+    """Главная проверка против расхождения копии с оригиналом.
+
+    Поля бланка были переписаны руками и отстали: `live_inspections` и
+    `live_wells` добавились со своими фильтрами, а в бланке их не появилось.
+    Модель видела инструмент в списке действий и не имела поля, чтобы
+    передать ему категорию, — то есть попросить «трубы под списание» через
+    бланк было физически нечем. Именно бланком работает облачная модель.
+
+    Тест сторожит не текст, а СВЯЗЬ: любой новый параметр любого инструмента
+    обязан появиться в бланке сам.
+    """
+    from app.agent import decision_schema
+
+    tools = LiveToolbox(FakeToolbox({})).specs()
+    blank = set(decision_schema(tools)["properties"])
+
+    for spec in tools:
+        name = spec["function"]["name"]
+        for parameter in (spec["function"].get("parameters") or {}).get("properties") or {}:
+            assert parameter in blank, f"{name}.{parameter} не попал в бланк решения"
+
+
+def test_every_blank_field_is_described_for_the_model() -> None:
+    """Описание поля — это промпт, и модель его читает.
+
+    В переписанном руками списке описаний не было ни у одного параметра. То
+    есть каждый из них был описан для модели в описании инструмента и пуст в
+    бланке — пуст именно там, где работает облачная модель.
+    """
+    from app.agent import decision_schema
+
+    fields = decision_schema(LiveToolbox(FakeToolbox({})).specs())["properties"]
+
+    undescribed = [name for name, schema in fields.items() if not schema.get("description")]
+    assert undescribed == [], f"без описания: {undescribed}"
+
+
+def test_same_named_parameters_do_not_disagree_on_type() -> None:
+    """`top_n` у парка и у скважин — одно поле бланка, и тип у него один.
+
+    Бланк плоский, поэтому одноимённые параметры разных инструментов
+    сливаются. Несовпадение типов означало бы, что бланк молча навязывает
+    одному инструменту чужой тип: провайдер построит грамматику по первому
+    описанию, а второй инструмент получит не то, что просил. Такое надо
+    ронять тестом, а не примирять втихую.
+    """
+    seen: dict[str, str] = {}
+    for spec in LiveToolbox(FakeToolbox({})).specs():
+        for name, schema in (
+            (spec["function"].get("parameters") or {}).get("properties") or {}
+        ).items():
+            kind = str(schema.get("type"))
+            assert seen.setdefault(name, kind) == kind, (
+                f"параметр {name} объявлен и как {seen[name]}, и как {kind}"
+            )
+
+
+def test_the_inspection_category_is_a_closed_list() -> None:
+    """Четыре значения — значит перечисление, а не строка с подсказкой.
+
+    Со свободной строкой опечатка `SCRAPP` доходила до кода и стоила шага:
+    инструмент отвечал «неизвестная категория», а шагов у агента два.
+    Перечисление отбирает у модели саму возможность написать пятое значение.
+
+    Список сверяется с тем же кортежем, по которому идёт проверка в `live`:
+    два списка значений разошлись бы молча.
+    """
+    from app.rag.live import CATEGORIES
+    from app.rag.tools import LIVE_SPECS
+
+    for spec in LIVE_SPECS:
+        if spec["function"]["name"] != "live_inspections":
+            continue
+        category = spec["function"]["parameters"]["properties"]["category"]
+        assert category.get("enum") == list(CATEGORIES)
+        return
+    raise AssertionError("инструмент live_inspections не найден")
 
 
 def test_enough_is_the_last_choice_not_the_first() -> None:
@@ -615,7 +741,15 @@ class ChattyThenNative:
                     tool_calls=[ToolCall(name="search_wiki", arguments={"query": "износ"})]
                 )
         else:
-            yield ChatChunk(text='{"why": "поищем", "action": "search_wiki", "query": "износ"}')
+            # Схема спрашивает двумя вопросами: сначала «хватает ли», потом
+            # «чем». Отвечаем по тому, о чём спросили.
+            fields = ((request.json_schema or {}).get("properties") or {})
+            if "need" in fields:
+                yield ChatChunk(text='{"why": "мало", "need": "НУЖНЫ ДАННЫЕ ИЗ СЕРВИСА"}')
+            else:
+                yield ChatChunk(
+                    text='{"why": "поищем", "action": "search_wiki", "query": "износ"}'
+                )
         yield ChatChunk(done=True, finish_reason=FinishReason.STOP, usage=Usage())
 
 
@@ -785,3 +919,324 @@ def test_the_tool_result_no_longer_offers_a_cursor_to_the_agent() -> None:
     from app.rag import result
 
     assert "cursor=" not in inspect.getsource(result.Dataset.agent_note)
+
+
+def test_the_report_shows_the_reasoning_length_not_its_head() -> None:
+    """Длина обоснования — это улика, и печатать её надо числом.
+
+    Отчёт печатал первые 90 символов сырого JSON. На них уходили служебные
+    скобки и начало фразы, а вопрос «оборвано или дописано» решается КОНЦОМ
+    и ДЛИНОЙ. Я трижды читал эту строку и дважды ответил неверно: сначала
+    решил, что бланк рубится по токенам, потом — что дело в порядке
+    значений. Настоящая причина (наша же граница в 200 символов) в этой
+    строке была видна одним числом, которого там не было.
+    """
+    from eval.report import _blank_lines
+
+    why = "а" * 200
+    rendered = "\n".join(
+        _blank_lines('{"why": "' + why + '", "action": "ХВАТИТ"}', "схема (хватит)")
+    )
+
+    assert "200 симв." in rendered, "длина обоснования обязана быть видна числом"
+    assert "действие: ХВАТИТ" in rendered
+    # И хвост обоснования доезжает, а не обрезается на голове.
+    assert why[-40:] in rendered
+
+
+def test_the_state_says_the_service_is_up_when_it_is_reachable() -> None:
+    """Строка про сервис — лечение дефекта, найденного на 45 наблюдениях.
+
+    Шесть прогонов на девяти живых вопросах дали разделение без единого
+    исключения: агент шёл в сервис тогда и только тогда, когда описание
+    сервиса случайно попало в найденные фрагменты (20 из 20), и не шёл, когда
+    не попало (0 из 25). Решал не вопрос, а поиск.
+
+    Модель судит о наличии данных по контексту, а контекст про сервис молчал.
+    Поэтому фраза стоит в СОСТОЯНИИ, рядом с фрагментами, — там, где модель
+    ищет доказательства.
+    """
+    from app.agent import _state
+    from app.rag.tools import LIVE_SPECS, tool_specs
+
+    with_live = _state(
+        "какие трубы под списание", [], tools=tool_specs() + list(LIVE_SPECS), live=True
+    )
+
+    assert "СЕРВИС ЖИВЫХ ДАННЫХ ПОДКЛЮЧЁН" in with_live
+    # И адресовано ровно тому выводу, который модель делала дословно:
+    # «во фрагментах есть только правила, но нет списка труб» -> ХВАТИТ.
+    assert "ЭТО НОРМА" in with_live
+
+
+def test_the_state_is_silent_about_a_service_the_person_cannot_reach() -> None:
+    """Обещать сервис, которого не дали, — хуже, чем молчать о нём.
+
+    Список инструментов уже собран по правам этого человека и по тому,
+    настроен ли сервис. Сказать про сервис в обход этого списка значило бы
+    послать модель за данными, на которые она получит отказ, — и потратить
+    на это разрешённые шаги.
+    """
+    from app.agent import _state
+    from app.rag.tools import tool_specs
+
+    without_live = _state("какие трубы под списание", [], tools=tool_specs(), live=True)
+
+    assert "СЕРВИС ЖИВЫХ ДАННЫХ" not in without_live
+
+
+def test_the_digest_covers_the_state_text_too() -> None:
+    """В отпечаток идёт ВСЁ, что уезжает модели и живёт в коде.
+
+    Этот сторож был слеп трижды: сначала считался от одних имён полей
+    схемы, потом не видел их содержимого, потом не видел постоянного блока
+    состояния — и промолчал на правке, которая меняла поведение агента
+    сильнее всех предыдущих. Тест закрывает третий случай.
+    """
+    from app import agent as agent_module
+
+    before = agent_module.agent_version()
+    original = agent_module.LIVE_AVAILABLE
+    try:
+        agent_module.LIVE_AVAILABLE = original + " "
+        assert agent_module.agent_version() != before, "текст состояния не в отпечатке"
+    finally:
+        agent_module.LIVE_AVAILABLE = original
+    assert agent_module.agent_version() == before
+
+
+def test_a_rule_question_keeps_its_way_out() -> None:
+    """На вопросе о правилах отказ обязан остаться в списке.
+
+    Убрать его везде мы уже пробовали. Агент при этом починился
+    (`tools_ok` 0.333 -> 0.556, отказов не осталось), а ответы обвалились:
+    `answer_contains` 0.963 -> 0.596, задержка выросла вчетверо. Потому что
+    на обычных вопросах модель, лишённая отказа, звала что попало —
+    `read_section`, `search_wiki`, `live_pipe` — и портила контекст.
+    """
+    from app.agent import decision_schema
+
+    tools = LiveToolbox(FakeToolbox({})).specs()
+
+    assert "ХВАТИТ" in decision_schema(tools)["properties"]["action"]["enum"]
+    assert "ХВАТИТ" not in decision_schema(tools, allow_enough=False)["properties"]["action"]["enum"]
+
+
+def test_a_live_question_loses_its_way_out() -> None:
+    """А на живом вопросе — не обязан: решение уже принято кодом.
+
+    Порядок именно такой: сначала правило в коде говорит «это про сегодняшние
+    данные», и только после этого у модели забирают отказ. Забрать его до
+    решения означало бы заставлять звать сервис на вопросах о правилах.
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    toolbox = FakeToolbox({"live_fleet": ToolOutcome(text="таблица", hits=[hit(9)])})
+    providers = TextOnlyProviders('{"why": "парк", "action": "live_fleet", "top_n": 5}')
+    agent = Agent(settings=settings, toolbox=LiveToolbox(toolbox), providers=providers)
+
+    outcome = asyncio.run(
+        agent.gather("дай топ 5 труб", empty_result([hit(1)]), trace=FakeTrace(), live_allowed=True)
+    )
+
+    assert toolbox.ran == [("live_fleet", {"top_n": 5})]
+    # Один вызов модели, а не два: привратник ничего не стоит.
+    assert len(providers.requests) == 1
+    schema = providers.requests[0].json_schema
+    assert "ХВАТИТ" not in schema["properties"]["action"]["enum"]
+
+
+def test_the_digest_covers_the_routing_rule() -> None:
+    """Правило маршрутизации решает больше, чем любая строка промпта.
+
+    Оно определяет, останется ли у модели вариант «ХВАТИТ». Два прогона с
+    разными правилами обязаны различаться в шапке, иначе сравнение объявит
+    разницу между ними шумом.
+    """
+    from app import agent as agent_module
+
+    before = agent_module.agent_version()
+    path = agent_module.Path(agent_module.route.__file__)
+    original = path.read_text(encoding="utf-8")
+    try:
+        path.write_text(original + "\n# проверка\n", encoding="utf-8")
+        assert agent_module.agent_version() != before, "правило не попало в отпечаток"
+    finally:
+        path.write_text(original, encoding="utf-8")
+    assert agent_module.agent_version() == before
+
+
+def test_a_rule_question_is_not_told_about_the_service() -> None:
+    """Строка про сервис на вопросе о правилах — подталкивание не туда.
+
+    Висела она на всех вопросах, и это стоило десяти обычных. Из замера:
+    «какой порог внимания по выработке» и «к какой длине приводится DLS»
+    ушли в `live_fleet`, таблица встала в контекст первой, и нужный чанк
+    съехал с первого места на второе — `chunk_top1` 0.807 -> 0.725. В
+    прогоне без этой строки таких вызовов не было вовсе.
+
+    Строка писалась, чтобы РАЗБЛОКИРОВАТЬ живые вопросы. Значит и показывать
+    её надо только им.
+    """
+    from app.agent import _state
+    from app.rag.tools import LIVE_SPECS, tool_specs
+
+    tools = tool_specs() + list(LIVE_SPECS)
+    rule = _state("какой порог внимания по выработке ресурса", [], tools=tools, live=False)
+
+    assert "СЕРВИС ЖИВЫХ ДАННЫХ" not in rule
+
+
+def test_the_routed_tool_is_a_hint_not_an_order() -> None:
+    """Имя источника подсказывается, но список действий остаётся полным.
+
+    Правило угадало инструмент 9 из 9 — на девяти примерах и четырёх
+    классах. Этого мало для запрета: ошибись правило на живом вопросе, и
+    модель осталась бы без единого способа взять данные. Подсказка ошибается
+    дешево, запрет — дорого.
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    toolbox = FakeToolbox({"live_inspections": ToolOutcome(text="таблица", hits=[hit(9)])})
+    providers = TextOnlyProviders(
+        '{"why": "списание", "action": "live_inspections", "category": "SCRAP"}'
+    )
+    agent = Agent(settings=settings, toolbox=LiveToolbox(toolbox), providers=providers)
+
+    asyncio.run(
+        agent.gather(
+            "какие трубы под списание", empty_result([hit(1)]),
+            trace=FakeTrace(), live_allowed=True,
+        )
+    )
+
+    asked = providers.requests[0]
+    assert "live_inspections" in asked.user, "имя источника обязано быть в подсказке"
+    # Список действий полный: модель вправе выбрать иначе.
+    assert len(asked.json_schema["properties"]["action"]["enum"]) > 1
+
+
+def test_the_second_step_can_stop_once_data_is_in() -> None:
+    """Забрать у модели отказ — не то же самое, что забрать его навсегда.
+
+    Я снял его на всех шагах, а не только на первом, и замер показал цену:
+    каждый живой вопрос звал инструмент ДВАЖДЫ — `live_fleet, live_fleet`.
+    Модель не упрямилась, ей нечем было остановиться. `tables_ok` 1.000 ->
+    0.750, `live_clean` 1.000 -> 0.917: вторая таблица на экране, которую
+    никто не просил.
+
+    Запрет осмысленен ровно до первой удачной выборки: он существует, чтобы
+    модель не увернулась от похода за данными, а не чтобы ходила бесконечно.
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=2, agent_decision="schema")
+    toolbox = FakeToolbox({"live_fleet": ToolOutcome(text="таблица", hits=[hit(9)])})
+    providers = TextOnlyProviders('{"why": "парк", "action": "live_fleet", "top_n": 5}')
+    agent = Agent(settings=settings, toolbox=LiveToolbox(toolbox), providers=providers)
+
+    asyncio.run(
+        agent.gather(
+            "дай топ 5 труб", empty_result([hit(1)]), trace=FakeTrace(), live_allowed=True
+        )
+    )
+
+    # Первый запрос — без отказа: за данными надо идти.
+    assert "ХВАТИТ" not in providers.requests[0].json_schema["properties"]["action"]["enum"]
+    # Второй — с отказом: данные уже взяты, и остановиться должно быть чем.
+    assert len(providers.requests) >= 2
+    assert "ХВАТИТ" in providers.requests[1].json_schema["properties"]["action"]["enum"]
+
+
+def test_the_hint_carries_the_pipe_id() -> None:
+    """Подсказка называет и трубу, если она названа в вопросе."""
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    toolbox = FakeToolbox({"live_pipe": ToolOutcome(text="паспорт", hits=[hit(9)])})
+    providers = TextOnlyProviders(
+        '{"why": "паспорт", "action": "live_pipe", "pipe_id": "PP-0035"}'
+    )
+    agent = Agent(settings=settings, toolbox=LiveToolbox(toolbox), providers=providers)
+
+    asyncio.run(
+        agent.gather(
+            "какая выработка у PP-0035", empty_result([hit(1)]),
+            trace=FakeTrace(), live_allowed=True,
+        )
+    )
+
+    assert "PP-0035" in providers.requests[0].user
+    assert "pipe_id" in providers.requests[0].user
+
+
+def test_the_lost_pipe_id_is_put_back_by_code() -> None:
+    """Модель позвала паспорт трубы и не передала трубу — код дописывает.
+
+    Замер на 144 вопросах: оба вопроса про конкретную трубу («какая выработка
+    у PP-0035», «что с трубой PP-0007») выбрали ВЕРНЫЙ инструмент и получили
+    таблиц 0. Клиент при этом рабочий — проверено против стенда напрямую.
+    Вызов отбивала проверка «паспорт без идентификатора», потому что трубы в
+    аргументах не было. Подсказка в состоянии её называет прямым текстом и не
+    помогает: это седьмой случай, когда верная инструкция в промпте не
+    становится верным аргументом.
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    toolbox = FakeToolbox({"live_pipe": ToolOutcome(text="паспорт", hits=[hit(9)])})
+    # Трубы в решении нет вовсе — ровно то, что было в прогоне.
+    providers = TextOnlyProviders('{"why": "паспорт", "action": "live_pipe"}')
+    agent = Agent(settings=settings, toolbox=LiveToolbox(toolbox), providers=providers)
+
+    asyncio.run(
+        agent.gather(
+            "какая выработка у PP-0035", empty_result([hit(1)]),
+            trace=FakeTrace(), live_allowed=True,
+        )
+    )
+
+    assert toolbox.ran, "инструмент не позвали вовсе"
+    name, arguments = toolbox.ran[0]
+    assert name == "live_pipe"
+    assert arguments.get("pipe_id") == "PP-0035"
+
+
+def test_a_dirty_pipe_id_is_cleaned_not_rejected() -> None:
+    """«труба PP-0035» — это обозначение с мусором, а не отсутствие его.
+
+    Проверка в `tools.py` сверяет аргумент ЦЕЛИКОМ и такую строку отбивает,
+    хотя клиент с ней справился бы. Разбор у нас уже есть — тот же, что
+    достаёт трубу из вопроса; им и приводим к нужному виду.
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    toolbox = FakeToolbox({"live_pipe": ToolOutcome(text="паспорт", hits=[hit(9)])})
+    providers = TextOnlyProviders(
+        '{"why": "паспорт", "action": "live_pipe", "pipe_id": "труба PP-0035."}'
+    )
+    agent = Agent(settings=settings, toolbox=LiveToolbox(toolbox), providers=providers)
+
+    asyncio.run(
+        agent.gather(
+            "какая выработка у PP-0035", empty_result([hit(1)]),
+            trace=FakeTrace(), live_allowed=True,
+        )
+    )
+
+    assert toolbox.ran[0][1].get("pipe_id") == "PP-0035"
+
+
+def test_another_pipe_named_by_the_model_is_kept() -> None:
+    """Своё значение модели в приоритете, и это не мелочь.
+
+    Вопрос может быть про две трубы, и подменить выбор молча значило бы
+    спрятать ошибку выбора вместо того, чтобы дать её увидеть в замере.
+    Дописываем только там, где своего обозначения нет вовсе.
+    """
+    settings = Settings(agent_enabled=True, agent_max_steps=1, agent_decision="schema")
+    toolbox = FakeToolbox({"live_pipe": ToolOutcome(text="паспорт", hits=[hit(9)])})
+    providers = TextOnlyProviders(
+        '{"why": "паспорт", "action": "live_pipe", "pipe_id": "PP-0100"}'
+    )
+    agent = Agent(settings=settings, toolbox=LiveToolbox(toolbox), providers=providers)
+
+    asyncio.run(
+        agent.gather(
+            "сравни PP-0035 и PP-0100", empty_result([hit(1)]),
+            trace=FakeTrace(), live_allowed=True,
+        )
+    )
+
+    assert toolbox.ran[0][1].get("pipe_id") == "PP-0100"

@@ -63,6 +63,14 @@ class Trace:
     # неотличим от успешного с невыставленным статусом.
     error: str = ""
     citations_failed: int = 0
+    # Ответ содержал кусок системного промпта и был подменён. Событие
+    # безопасности: одиночное — осечка, серия — атака, и увидеть серию можно
+    # только если каждый случай попал в журнал.
+    prompt_leak: bool = False
+    # Сколько предложений, отрицавших таблицу, убрано починкой ответа.
+    table_denial_fixed: int = 0
+    # Сколько предложений убрано за придуманное обозначение поверх таблицы.
+    invented_dropped: int = 0
     # Ссылки, снятые с отказа. Отдельное число: это другой дефект, и в
     # журнале он обязан быть отличим от непрошедшей цитаты.
     citations_dropped: int = 0
@@ -99,6 +107,9 @@ class Trace:
             # чтобы упавшие запросы можно было найти в журнале поиском по нему.
             **({"error": mask(self.error)} if self.error else {}),
             "citations_failed": self.citations_failed,
+            "prompt_leak": self.prompt_leak,
+            "table_denial_fixed": self.table_denial_fixed,
+            "invented_dropped": self.invented_dropped,
             "citations_dropped": self.citations_dropped,
             "usage": {
                 "prompt_tokens": self.prompt_tokens,

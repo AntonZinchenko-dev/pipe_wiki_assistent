@@ -30,7 +30,10 @@ from app.rag.search import Query, hybrid_search_many
 from app.rag.store import Store
 
 from .dataset import Question
-from .metrics import CORPUS_LANGUAGE, answer_contains, answer_language, mean, score_retrieval
+from .metrics import (
+    CORPUS_LANGUAGE, answer_contains, answer_language, answer_uses_table, mean,
+    score_retrieval, table_answered,
+)
 
 Mode = Literal["search", "answer"]
 
@@ -73,6 +76,14 @@ class RunConfig:
     judge_model: str = ""
     judge_think: bool | None = None
     judge_max_tokens: int = 0
+    # ВИДИТ ЛИ СУДЬЯ ПОЛУЧЕННЫЕ ТАБЛИЦЫ.
+    #
+    # Прибор без этого молчал на живых вопросах: сверять ответ ему было не с
+    # чем, документной выдержки для «дай топ 5 труб» не существует. Пять
+    # вопросов из девяти выпадали из счёта — и ровно те, где ответы врали.
+    # Значит `judge_ok` до и после этой правки — числа по РАЗНЫМ выборкам, и
+    # сравнивать их без пометки нельзя.
+    judge_sees_tables: bool = False
     # Вес ключевого списка при слиянии. Обязан быть в отпечатке: без него два
     # прогона с разным весом выглядят как одна конфигурация, и рост метрики
     # читается как улучшение системы, хотя изменилась настройка. Ровно на этом
@@ -217,6 +228,22 @@ class RowResult:
     tables_ok: bool | None = None
     tools_used: list[str] = field(default_factory=list)
     tools_ok: bool | None = None
+    # НАЗВАЛ ЛИ ОТВЕТ ХОТЬ ОДИН ОБЪЕКТ ИЗ ТАБЛИЦЫ, КОТОРУЮ САМ ЗАПРОСИЛ.
+    #
+    # Заведена после прогона, где ВСЕ агентские метрики показали идеал, а два
+    # живых ответа из девяти таблицу не использовали вовсе: один отвечал из
+    # регламента, другой описал трубу категорией, не назвав её. Мы мерили
+    # доставку таблицы и отсутствие выдумки — и не мерили, отвечает ли текст
+    # по этой таблице.
+    answer_uses_table: bool | None = None
+    # ДОШЁЛ ЛИ ОТКАЗ СЕРВИСА ДО ЧЕЛОВЕКА СЛОВАМИ. None — отказа не ждали.
+    #
+    # Отдельно от `tables_ok`, потому что мерят разное: таблица с отказом
+    # внутри приходит и считается таблицей, а вот сказал ли ассистент про
+    # отказ — не проверялось ничем. Прогон показал цену: на «что с трубой
+    # PP-0007», где сервис отвечает E-1042 всегда, ответ ушёл рассказывать
+    # про архивный постмортем и про отказ не упомянул ни словом.
+    refusal_said: bool | None = None
     # Что ОЖИДАЛОСЬ и ЧЕМ агент это объяснил.
     #
     # `tools_ok 0.000` — число без диагноза, ровно как когда-то «цитат не
@@ -230,8 +257,36 @@ class RowResult:
     # Детекторы уже написаны и работают в проде — здесь они становятся
     # метрикой, а не только предупреждением на экране.
     invented_refs: list[str] = field(default_factory=list)
+    # Придуманные обозначения, предложения с которыми сервер УБРАЛ из ответа.
+    #
+    # Считаются наравне с показанными: починка меняет то, что видит человек,
+    # а не то, что натворила модель. Не учитывать их значило бы получить
+    # `live_clean` 1.000 ровно в тот момент, когда мы научились прятать
+    # выдумку, — то есть наградить сокрытие.
+    invented_dropped: list[str] = field(default_factory=list)
     mismatched_refs: list[str] = field(default_factory=list)
     live_clean: bool | None = None
+    # ТАБЛИЦЫ СОХРАНЯЮТСЯ В ПРОГОН ЦЕЛИКОМ, а не счётчиком.
+    #
+    # Раньше в файл попадало только их КОЛИЧЕСТВО, и из-за этого судья не мог
+    # оценить ни одного ответа по живым данным: он сверяет ответ с выдержками
+    # из документов, а для «дай топ 5 труб» таких выдержек нет. В прогоне это
+    # выглядело так: `judge_ok 0.963` по 107 вопросам, и ровно те пять живых,
+    # которые сломаны, из счёта ИСКЛЮЧЕНЫ с пометкой «нет выдержек для
+    # сверки».
+    #
+    # То есть прибор молчал именно там, где система врёт. Это уже второй
+    # такой случай за день: `answer_contains` тоже освобождает живые вопросы
+    # от проверок и потому рос, пока ответы по таблицам разваливались.
+    #
+    # Сохраняем усечённо — заголовок, колонки и первые строки: судье нужно
+    # сверить утверждение с данными, а не получить копию базы.
+    datasets: list[dict] = field(default_factory=list)
+    # Ответ пользуется полученной таблицей, а не отрицает её. `None` —
+    # таблицы не было. Метрика заведена после дня, потраченного на
+    # `tools_ok`: он дошёл до 1.000, а ответы на живые вопросы при этом
+    # говорили «во фрагментах нет информации» поверх пришедшей таблицы.
+    table_answered: bool | None = None
 
     latency_ms: float = 0.0
     # Ошибка на этом вопросе. Прогон её переживает: одна упавшая модель не
@@ -476,15 +531,39 @@ async def run_answer(
                 else set(question.expect_tools)
                 <= {step["tool"] for step in ((meta.get("agent") or {}).get("steps") or [])}
             ),
+            # Код в ответе — И код в таблице. Второе обязательно: без него
+            # проверка засчитала бы ответ, который назвал код, не сходив в
+            # сервис, — то есть угадал по документу с таблицей кодов ошибок.
+            refusal_said=(
+                None if not question.expect_error
+                else (
+                    question.expect_error.lower() in str(answer.get("answer", "")).lower()
+                    and any(
+                        question.expect_error.lower()
+                        in json.dumps(_slim(table), ensure_ascii=False).lower()
+                        for table in datasets
+                    )
+                )
+            ),
+            answer_uses_table=answer_uses_table(
+                str(answer.get("answer", "")), [_slim(table) for table in datasets]
+            ),
             invented_refs=list(answer.get("unknown_refs") or []),
+            invented_dropped=list(answer.get("invented_dropped") or []),
             mismatched_refs=list(answer.get("mismatched_refs") or []),
             # «Чисто» означает: ни одного обозначения, которого сервис не
             # отдавал, и ни одного числа, разошедшегося с ним. Проверяется
             # только там, где таблицы вообще ожидались: у вопроса по
             # документам выдумывать нечего.
+            table_answered=table_answered(str(answer.get("answer", "")), len(datasets)),
+            datasets=[_slim(table) for table in datasets],
             live_clean=(
                 None if question.expect_tables is None
-                else not (answer.get("unknown_refs") or answer.get("mismatched_refs"))
+                else not (
+                    answer.get("unknown_refs")
+                    or answer.get("mismatched_refs")
+                    or answer.get("invented_dropped")
+                )
             ),
             citations_on_refusal=(
                 int(answer.get("citations_dropped") or 0)
@@ -516,7 +595,9 @@ async def run_answer(
         # правильность отказа проверяется статусом, без модели и без затрат.
         if judge is not None and judgeable(row):
             try:
-                verdict = await judge.verdict(question=question, answer=row.answer)
+                verdict = await judge.verdict(
+                    question=question, answer=row.answer, datasets=row.datasets,
+                )
                 row.judge_verdict = verdict.correct
                 row.judge_reason = verdict.reason or "без причины"
                 row.judge_fragment = verdict.fragment
@@ -630,7 +711,9 @@ async def judge_rows(
             continue
 
         try:
-            verdict = await judge.verdict(question=question, answer=row.answer)
+            verdict = await judge.verdict(
+                question=question, answer=row.answer, datasets=row.datasets,
+            )
             row.judge_verdict = verdict.correct
             row.judge_reason = verdict.reason or "без причины"
             row.judge_fragment = verdict.fragment
@@ -646,6 +729,30 @@ async def judge_rows(
             on_progress(number, len(rows), rows)
 
     return judged
+
+
+def _slim(table: dict, *, rows_kept: int = 12) -> dict:
+    """Таблица для файла прогона: заголовок, колонки и начало строк.
+
+    Целиком класть незачем — прогон и так весит триста килобайт, а судье
+    для сверки утверждения нужны первые строки, а не вся выборка. Число
+    НАЙДЕННОГО сохраняем обязательно: «показано 5 из 39» и «найдено всего
+    5» — разные факты, и именно на этой разнице ответы и врут.
+
+    ОТКАЗ СОХРАНЯЕМ ТОЖЕ, и его здесь не было. Из-за этого в файле прогона
+    таблица, которой сервис отказал, выглядела точно так же, как таблица,
+    в которой честно нашлось ноль строк, — а это разные диагнозы и разные
+    ремонты. На вопросе про трубу PP-0007, где стенд отвечает E-1042 всегда,
+    отличить их было нечем.
+    """
+    return {
+        "title": table.get("title", ""),
+        "columns": table.get("columns", []),
+        "rows": (table.get("rows") or [])[:rows_kept],
+        "rows_kept": min(len(table.get("rows") or []), rows_kept),
+        "total_found": table.get("total_found", 0),
+        "error": table.get("error"),
+    }
 
 
 def _rate(rows, field_name: str) -> float | None:
@@ -789,7 +896,10 @@ def aggregate(rows: list[RowResult]) -> dict:
             # вопроса про живые данные: ноль читался бы как «всё плохо».
             "tables_ok": _rate(subset, "tables_ok"),
             "tools_ok": _rate(subset, "tools_ok"),
+            "refusal_said": _rate(subset, "refusal_said"),
+            "answer_uses_table": _rate(subset, "answer_uses_table"),
             "live_clean": _rate(subset, "live_clean"),
+            "table_answered": _rate(subset, "table_answered"),
             "citations_ok": (
                 1.0 - sum(row.citations_failed for row in subset) / total_citations
                 if (total_citations := sum(row.citations_total for row in subset))
@@ -835,12 +945,35 @@ def aggregate(rows: list[RowResult]) -> dict:
     }
 
 
+def safe_label(label: str) -> str:
+    """Метка, из которой можно делать имя файла.
+
+    Нужно после живого случая: метка приехала как `verdict.\\run.ps1` —
+    человек вставил команду дважды, и второе «.\\run.ps1 verdict» ушло в
+    аргумент. Прогон на девяносто минут отработал и сохранился по пути
+    `...-answer-verdict.\\run.ps1.json`, то есть в подпапку с именем
+    `verdict.`. Файл после этого не находился ни по метке, ни в списке
+    прогонов: работа сделана, результат потерян.
+
+    Чинить это уговором «пишите метки аккуратно» нельзя — метку набирают
+    руками в конце длинной команды. Разделители пути и всё, что не годится
+    в имя файла, заменяются на дефис; пустая метка становится `run`.
+    """
+    cleaned = "".join(
+        symbol if (symbol.isalnum() or symbol in "-_") else "-"
+        for symbol in label.strip()
+    ).strip("-")
+    # Точки в начале и в конце убираем отдельно: `verdict.` — законное имя
+    # файла на многих системах и невидимая ловушка на Windows.
+    return cleaned.strip(".") or "run"
+
+
 def save_run(
     *, config: RunConfig, rows: list[RowResult], directory: Path
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(config.started_at))
-    path = directory / f"{stamp}-{config.mode}-{config.label}.json"
+    path = directory / f"{stamp}-{config.mode}-{safe_label(config.label)}.json"
     payload = {
         "config": asdict(config),
         "aggregate": aggregate(rows),

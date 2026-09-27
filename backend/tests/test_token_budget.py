@@ -83,3 +83,29 @@ def test_the_pipeline_refuses_to_start_on_an_overflow() -> None:
         Pipeline(
             settings=settings, store=None, providers=None, traces=None,
         )
+
+
+def test_a_label_with_a_path_inside_cannot_lose_the_run() -> None:
+    """Прогон на полтора часа потерялся из-за метки. Больше — нет.
+
+    Метка приехала как `verdict.\\run.ps1`: человек вставил команду дважды, и
+    второе «.\\run.ps1 verdict» ушло в аргумент. Файл сохранился по пути
+    `...-answer-verdict.\\run.ps1.json`, то есть в подпапку `verdict.` — и
+    после этого не находился ни по метке, ни в списке прогонов. Работа
+    сделана, результат недоступен.
+
+    Уговором «набирайте метки аккуратно» это не лечится: метку пишут руками
+    в конце длинной команды, и ошибаться там будут всегда.
+    """
+    from eval.runner import safe_label
+
+    assert "/" not in safe_label("a/b")
+    assert "\\" not in safe_label("verdict.\\run.ps1")
+    assert not safe_label("verdict.").endswith("."), "точка на конце — ловушка Windows"
+    # Пустая метка обязана превратиться в имя, а не в пустоту.
+    assert safe_label("   ") == "run"
+    assert safe_label("..") == "run"
+    # Нормальную метку трогать нельзя: иначе сравнение прогонов по имени
+    # начнёт промахиваться.
+    assert safe_label("enum-order") == "enum-order"
+    assert safe_label("ok-1_2") == "ok-1_2"

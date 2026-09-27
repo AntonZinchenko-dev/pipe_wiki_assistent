@@ -57,7 +57,7 @@ from eval.metrics import (  # noqa: E402
 )
 from eval.runner import (  # noqa: E402
     RunConfig, judge_rows, judgeable, load_run, rows_from_run, run_answer, run_search,
-    save_run, write_run,
+    safe_label, save_run, write_run,
 )
 
 
@@ -131,6 +131,7 @@ def make_config(
         agent_max_steps=settings.agent_max_steps if agent else 0,
         agent_max_tokens=settings.agent_max_tokens if agent else 0,
         agent_version=agent_version() if agent else "",
+        judge_sees_tables=True,
         agent_decision=settings.agent_decision if agent else "",
         run_as=run_as,
         restricted_projects=settings.restricted_projects,
@@ -144,7 +145,7 @@ def make_config(
         # промпта под одним именем, и `compare` честно объявил бы их «одной
         # конфигурацией». Прибор, который врёт о себе, хуже отсутствующего:
         # отсутствующий заметен.
-        prompt_version=prompt_version or pipeline_module.PROMPT_VERSION,
+        prompt_version=prompt_version or prompt_module.active_prompt(settings).version,
         code_version=code_version(),
         dataset_version=dataset.dataset_version(),
         **{f"labels_{key}": value for key, value in dataset.label_versions().items()},
@@ -933,7 +934,7 @@ async def _answer(args) -> int:
     )
     path = runs_dir() / (
         f"{time.strftime('%Y%m%d-%H%M%S', time.localtime(config.started_at))}"
-        f"-answer-{args.label}.json"
+        f"-answer-{safe_label(args.label)}.json"
     )
     config_dict = asdict(config)
 

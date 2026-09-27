@@ -346,7 +346,45 @@ class Judge:
             self.excerpts_for(question)
         return self._label_cache.get(question.id, [])
 
-    async def verdict(self, *, question: Question, answer: str) -> Verdict:
+    @staticmethod
+    def table_excerpt(datasets: list[dict]) -> str:
+        """Полученная таблица — как выдержка для судьи.
+
+        Без неё судья не мог оценить ни одного ответа по живым данным: он
+        сверяет утверждения с выдержками из ДОКУМЕНТОВ, а для «дай топ 5 труб»
+        документной выдержки не существует. Пять живых вопросов из девяти
+        выпадали из счёта с пометкой «нет выдержек для сверки» — и это ровно
+        те пять, где ответы и были сломаны.
+
+        Число НАЙДЕННОГО печатается обязательно, отдельно от числа
+        показанных строк. Разница между «найдено 39, показано 5» и «найдено
+        всего 5» — это и есть то, на чём ответы врут: «в таблице показаны
+        только три трубы» звучит как жалоба на нехватку данных, а на деле
+        три строки и были всем, что просили.
+        """
+        parts: list[str] = []
+        for table in datasets:
+            columns = [
+                str(column.get("title") or column.get("key") or "")
+                for column in (table.get("columns") or [])
+            ]
+            head = f"{table.get('title', 'Таблица')}"
+            found = table.get("total_found")
+            shown = len(table.get("rows") or [])
+            if found:
+                head += f" (найдено {found}, в выдержке строк {shown})"
+            lines = [head, " | ".join(columns)] if columns else [head]
+            for row in table.get("rows") or []:
+                lines.append(" | ".join(
+                    str(row.get(column.get("key"), ""))
+                    for column in (table.get("columns") or [])
+                ))
+            parts.append("\n".join(lines))
+        return "\n\n".join(parts)
+
+    async def verdict(
+        self, *, question: Question, answer: str, datasets: list[dict] | None = None
+    ) -> Verdict:
         # Язык — первым, до модели и до выдержек: правило детерминированное и
         # от разметки не зависит. См. language_verdict.
         by_language = language_verdict(answer)
@@ -354,6 +392,17 @@ class Judge:
             return by_language
 
         excerpts = self.excerpts_for(question)
+        # ТАБЛИЦА ИДЁТ В ВЫДЕРЖКИ НАРАВНЕ С ДОКУМЕНТАМИ.
+        #
+        # Для вопроса о сегодняшних числах она и есть источник истины:
+        # документ описывает правила, а значения живут в сервисе. Судья,
+        # которому её не дали, либо молчал («нет выдержек»), либо — что
+        # хуже — судил ответ по табличным данным, сверяясь с регламентом.
+        # Второе случилось на a007: вердикт «неверно» был правильным, а
+        # обоснование опиралось не на ту улику.
+        table = self.table_excerpt(datasets or [])
+        if table:
+            excerpts = f"{excerpts}\n\n{table}" if excerpts else table
         if not excerpts:
             # Сверять не с чем — это брак разметки или индекса, а не плохой
             # ответ системы. Записывать это в «неверно» значит наказывать

@@ -242,9 +242,11 @@ def test_needles_discriminate():
 
     from eval.dataset import MAX_NEEDLE_OCCURRENCES, load
 
+    # Разметка ищется в чанках, а в них текст из PDF: обратных кавычек
+    # markdown там нет. Сырой исходник с `SCRAP` не совпал бы с «категорию SCRAP».
     corpus = pathlib.Path(__file__).resolve().parents[2] / "corpus" / "source"
     bodies = [
-        " ".join(path.read_text(encoding="utf-8").split()).lower()
+        " ".join(path.read_text(encoding="utf-8").replace("`", "").split()).lower()
         for path in corpus.glob("*.md")
     ]
     assert bodies, "корпус не найден"

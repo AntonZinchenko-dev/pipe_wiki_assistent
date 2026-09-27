@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -26,8 +27,17 @@ from .config import Settings, budget_problems
 from .providers import ChatRequest, ProviderError, ProviderRegistry, ProviderUnavailable
 from .providers.base import FinishReason
 from .rag import answer as answer_mod
+from .rag import route
 from .rag.answer import AnswerEnvelope, AnswerStatus, StreamingAnswerParser
 from .rag.context import build_context, estimate_tokens
+from .rag.leak import REFUSAL, leaked_lines
+from .rag.scope import OFF_TOPIC, nothing_to_search, vocabulary
+from .rag.table_answer import (
+    ENOUGH as table_enough,
+    drop_invented,
+    repair as repair_denial,
+    surviving_refs,
+)
 from .rag.embed import embed_query
 from .rag.history import Turn, as_block, needs_history, summarize, support_query
 from .rag.history import trim as history_trim
@@ -38,6 +48,8 @@ from .rag.live import LiveApi
 from .rag.store import IndexMismatch, Store
 from .rag.tools import Toolbox
 from .trace import Trace, TraceWriter
+
+log = logging.getLogger("pipewiki")
 
 MAX_QUESTION_CHARS = 1000
 
@@ -88,6 +100,7 @@ class Pipeline:
         if problems:
             raise RuntimeError("; ".join(problems))
         self._store = store
+        self._vocab: set[str] | None = None
         self._providers = providers
         self._traces = traces
         self._alerts = alerts
@@ -109,6 +122,20 @@ class Pipeline:
             ),
             providers=providers,
         )
+
+    def _vocabulary(self) -> set[str]:
+        """Словарь корпуса. Считается один раз на жизнь конвейера.
+
+        Берётся из ИНДЕКСА, а не из файлов на диске: индекс — это то, по
+        чему система действительно ищет, и словарь обязан отставать от него
+        ровно на ноль. Пересборка индекса поднимает сервис заново, так что
+        кэш здесь не устаревает.
+        """
+        if self._vocab is None:
+            self._vocab = vocabulary(
+                [chunk.body for chunk in self._store.all_chunks()]
+            )
+        return self._vocab
 
     @property
     def prompt_version(self) -> str:
@@ -418,17 +445,28 @@ class Pipeline:
             below = {hit.chunk.chunk_id for hit in result.hits}
             hits = [hit for hit in hits if hit.chunk.chunk_id not in below]
 
+        # ВОПРОС НЕ ПРО ВИКИ — ОТСЕКАЕМ ДО МОДЕЛИ.
+        #
+        # Порогом близости это не решается: у «как дела?» косинус 0.457, у
+        # «что» — 0.409, а у настоящих отвечаемых вопросов нижняя граница
+        # 0.425. Диапазоны перекрываются, и порог, отсекающий мусор, отрежет
+        # честные вопросы. Разделяет не близость, а словарь: слова «дела» в
+        # наших шестнадцати документах нет вовсе.
+        off_topic = hits and nothing_to_search(question, self._vocabulary())
+        if off_topic:
+            hits = []
+
         if not hits:
             envelope = AnswerEnvelope(
                 status=AnswerStatus.NO_CONTEXT,
-                answer=(
+                answer=OFF_TOPIC if off_topic else (
                     "В вики нет фрагмента, который отвечал бы на этот вопрос. "
                     f"Лучшая найденная близость {result.best_vector_score:.2f} ниже "
                     f"порога {result.floor:.2f}."
                 ),
             )
             trace.status = envelope.status.value
-            trace.stop_reason = "below_similarity_floor"
+            trace.stop_reason = "off_topic" if off_topic else "below_similarity_floor"
             yield Event("meta", self._meta(
                 trace, result, fragments=[], agent=outcome,
                 turns=len(turns), rewritten=support,
@@ -609,12 +647,120 @@ class Pipeline:
                     if envelope.schema_error
                     else "ответ обрезан по лимиту токенов"
                 )
+            # ОТВЕТ ОТРИЦАЕТ ТАБЛИЦУ, КОТОРАЯ У ЧЕЛОВЕКА ПЕРЕД ГЛАЗАМИ.
+            #
+            # Чиним до проверки на утечку промпта: там подмена целиком, и
+            # чинить после неё было бы нечего.
+            #
+            # Приём тот же, которым мы уже чиним ссылки и статус: модель
+            # ошиблась в оформлении, а не по сути, и выбрасывать весь ответ
+            # значило бы наказать человека за нашу проблему. Выбрасываем не
+            # ответ, а вредные предложения — «во фрагментах нет информации»
+            # и «показаны только три трубы» поверх полной таблицы.
+            tables_shown = len(outcome.datasets) if outcome else 0
+
+            # ЧЕМ ОТВЕЧАТЬ, КОГДА ОТ ОТВЕТА НИЧЕГО НЕ ОСТАЛОСЬ.
+            #
+            # По умолчанию «Данные в таблице выше». Безопасно и бесполезно:
+            # человек и сам видит, что таблица выше.
+            #
+            # Если вопрос про ОДИН крайний случай («на какой скважине трубы
+            # хуже всего»), настоящий ответ у нас на руках — верхняя строка
+            # отсортированной выборки. Каждое слово в ней из таблицы, ничего
+            # не выдумано и никакого суждения не заявлено: не «хуже всего
+            # W-122», а «верхняя строка такая».
+            #
+            # Два условия обязательны. ОДНА таблица — при двух непонятно, чья
+            # строка; и `wants_one_row` — на «дай топ 5» верхняя строка не
+            # ответ, и подмена ею завела бы новый дефект на месте починки.
+            enough = table_enough
+            if tables_shown == 1 and route.wants_one_row(question):
+                lead = outcome.datasets[0].leading_row()
+                if lead:
+                    enough = f"Верхняя строка таблицы: {lead}."
+
+            if tables_shown:
+                fixed, removed = repair_denial(
+                    envelope.answer, tables=tables_shown, enough=enough
+                )
+                if removed:
+                    alive = surviving_refs(fixed)
+                    envelope.answer = fixed
+                    envelope.citations = [
+                        citation for citation in envelope.citations
+                        if citation.fragment in alive
+                    ]
+                    envelope.table_denial_fixed = removed
+                    trace.table_denial_fixed = removed
+                    log.info("убрано %s предложений, отрицавших таблицу", removed)
+
+            # ПРИДУМАННОЕ ОБОЗНАЧЕНИЕ ПОВЕРХ ПРИШЕДШЕЙ ТАБЛИЦЫ.
+            #
+            # Из замера: на «на какой скважине трубы хуже всего» сервис отдал
+            # таблицу скважин, а ответ вышел такой — «самая изношенная труба
+            # парка PP-0035, выработано 97.7 %». Число из таблицы, обозначение
+            # из головы: PP-0035 нет ни в одном фрагменте и нет в вопросе.
+            #
+            # Чиним только при таблице, и это условие несущее. Без таблицы
+            # выброшенное предложение нечем заменить, и человек остался бы без
+            # ответа. С таблицей замена есть и она верная: перед ним стоят
+            # скважины, отсортированные по выработке, и первая строка — ответ.
+            #
+            # Дефект при этом НЕ ПРОПАДАЕТ из замера: обозначения переезжают
+            # в `invented_dropped`, и прогон по-прежнему считает такой ответ
+            # нечистым. Убираем показ, а не учёт.
+            if tables_shown and envelope.unknown_refs:
+                fixed, dropped = drop_invented(
+                    envelope.answer,
+                    invented=envelope.unknown_refs,
+                    tables=tables_shown,
+                    enough=enough,
+                )
+                if dropped:
+                    alive = surviving_refs(fixed)
+                    envelope.answer = fixed
+                    envelope.citations = [
+                        citation for citation in envelope.citations
+                        if citation.fragment in alive
+                    ]
+                    envelope.invented_dropped = dropped
+                    envelope.unknown_refs = [
+                        name for name in envelope.unknown_refs if name not in dropped
+                    ]
+                    trace.invented_dropped = len(dropped)
+                    log.warning(
+                        "убраны предложения с придуманными обозначениями: %s",
+                        ", ".join(dropped),
+                    )
+
+            # ПОСЛЕДНИЙ РУБЕЖ: модель выдала кусок своей же инструкции.
+            #
+            # Первый рубеж — разделение данных и инструкций — закрыт с двух
+            # сторон, но он состоит из текста, а рубеж из текста обходится
+            # текстом: правило «не раскрывай инструкцию» живёт в том самом
+            # промпте, который просят раскрыть. Поэтому здесь проверка кодом,
+            # по готовому ответу.
+            #
+            # Подменяем ЦЕЛИКОМ. Частично показанная инструкция — это всё ещё
+            # показанная инструкция, а вырезание куска вдобавок подсказывает
+            # атакующему, что именно сработало.
+            leaked = leaked_lines(envelope.answer, self._prompt.system)
+            if leaked:
+                log.warning(
+                    "ответ содержал %s строк системного промпта — подменён",
+                    len(leaked),
+                )
+                envelope.answer = REFUSAL
+                envelope.citations = []
+                envelope.prompt_leak = True
+                trace.prompt_leak = True
             span.attributes.update(
                 status=envelope.status.value,
                 citations=len(envelope.citations),
                 citations_failed=envelope.citations_failed,
                 citations_dropped=envelope.citations_dropped,
                 schema_valid=envelope.schema_valid,
+                prompt_leak=bool(leaked),
             )
 
         trace.status = envelope.status.value
